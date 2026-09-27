@@ -2270,8 +2270,8 @@ function renderTextOpts() {
     <div class="row tools">
       <div class="seg s3 icons">${['left', 'center', 'right'].map((a) => `<button data-talign="${a}" title="Alinhar ${{ left: 'à esquerda', center: 'ao centro', right: 'à direita' }[a]}"${t.align === a ? ' class="on"' : ''}>${ALIGN_ICONS[a]}</button>`).join('')}</div>
       <button id="tUppercase" class="btn small uppercaseToggle${t.uppercase ? ' on' : ''}" aria-label="Maiúsculas" aria-pressed="${!!t.uppercase}" title="Alternar maiúsculas">Aa</button>
-      <select id="tFont" title="Letra">${Object.entries(FONTS).map(([k, [n]]) => `<option value="${k}"${t.font === k ? ' selected' : ''}>${n}</option>`).join('')}</select>
     </div>
+    <div class="row fontRow"><select id="tFont" title="Letra">${Object.entries(FONTS).map(([k, [n]]) => `<option value="${k}"${t.font === k ? ' selected' : ''}>${n}</option>`).join('')}</select></div>
     <div class="row pos">
       <button class="btn small" data-tpos="cx" title="Centrar na horizontal">↔</button>
       <button class="btn small" data-tpos="cy" title="Centrar na vertical">↕</button>
