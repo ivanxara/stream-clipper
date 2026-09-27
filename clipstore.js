@@ -1,8 +1,9 @@
 // Armazenamento da extensão (IndexedDB):
-//  - clips:     o último clip (para o editor o poder abrir mesmo que a passagem entre abas falhe)
+//  - clips:     o último clip (fallback de abertura)
+//  - recent:    clips de origem recentes, para retomar edições
 //  - media:     biblioteca de vídeos/imagens para as composições
 //  - templates: composições guardadas
-const DB = 'streamclipper', VERSION = 2, STORES = ['clips', 'media', 'templates'];
+const DB = 'streamclipper', VERSION = 4, STORES = ['clips', 'recent', 'sessions', 'media', 'templates'];
 
 function open() {
   return new Promise((resolve, reject) => {
@@ -28,6 +29,32 @@ function tx(store, mode, fn) {
 export const saveLastClip = (blob, name, channel) => tx('clips', 'readwrite', (s) => s.put({ blob, name, channel, at: Date.now() }, 'last'));
 export const loadLastClip = () => tx('clips', 'readonly', (s) => s.get('last'));
 
+export async function saveRecentClip(blob, name, channel) {
+  const key = `${name}|${blob.size}`;
+  const existing = (await listRecentClips()).find((item) => item.key === key);
+  const item = { id: existing?.id || crypto.randomUUID(), key, blob, name, channel, at: Date.now() };
+  await put('recent', item);
+  const items = await listRecentClips();
+  await Promise.all(items.slice(12).map((old) => del('recent', old.id)));
+  return item;
+}
+
+export const loadRecentClip = (id) => tx('recent', 'readonly', (s) => s.get(id));
+export const touchRecentClip = async (id) => {
+  const item = await loadRecentClip(id);
+  if (!item) return null;
+  const updated = { ...item, at: Date.now() };
+  await put('recent', updated);
+  return updated;
+};
+
+export const loadEditorSession = (key) => tx('sessions', 'readonly', (s) => s.get(key));
+export async function saveEditorSession(key, session) {
+  await tx('sessions', 'readwrite', (s) => s.put({ ...session, id: key }, key));
+  const sessions = await all('sessions');
+  await Promise.all(sessions.slice(0, Math.max(0, sessions.length - 24)).map((old) => del('sessions', old.id)));
+}
+
 // Cada item tem um campo id, que é também a chave.
 const all = (store) => tx(store, 'readonly', (s) => s.getAll()).then((l) => (l || []).sort((a, b) => a.at - b.at));
 const put = (store, item) => tx(store, 'readwrite', (s) => s.put(item, item.id));
@@ -39,4 +66,5 @@ export const deleteMedia = (id) => del('media', id);
 export const listTemplates = () => all('templates');
 export const putTemplate = (t) => put('templates', t);
 export const deleteTemplate = (id) => del('templates', id);
+export const listRecentClips = () => all('recent').then((items) => items.reverse());
 

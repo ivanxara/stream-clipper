@@ -4,7 +4,7 @@
 // o ffmpeg.wasm só junta o som no fim.
 import { parseMp4 } from './mp4.js';
 import { FFmpeg } from './lib/ffmpeg/index.js';
-import { loadLastClip, saveLastClip, listMedia, putMedia, deleteMedia, listTemplates, putTemplate, deleteTemplate} from './clipstore.js';
+import { loadLastClip, saveLastClip, listRecentClips, loadRecentClip, saveRecentClip, touchRecentClip, loadEditorSession, saveEditorSession, listMedia, putMedia, deleteMedia, listTemplates, putTemplate, deleteTemplate} from './clipstore.js';
 import { importMediaFile, openMediaReader, usesFrameReader, isGif } from './media.js';
 import { createElementEditor, elementVisible, orderedElements, cleanElements } from './elements.js';
 
@@ -35,6 +35,8 @@ const st = {
   // ('media': scale 1 = encher a zona, ox/oy = desvio do centro em frações da zona).
   streamer: { split: 0.35, cam: null, game: null, bottom: 'game', mediaId: null, scale: 1, ox: 0, oy: 0 },
   library: [],      // itens da biblioteca (clipstore 'media')
+  recentClips: [],
+  recentId: '',
   images: [],
   busy: false,
 };
@@ -102,8 +104,8 @@ function regions() {
   if (st.layout === 'crop') return [{ id: 'crop', label: 'Moldura 9:16', aspect: 9 / 16 }];
   if (st.layout === 'streamer') {
     const ch = camH(OUT_V.h);
-    const r = [{ id: 'cam', label: 'Câmara', aspect: OUT_V.w / ch }];
-    if (st.streamer.bottom !== 'media') r.push({ id: 'game', label: 'Jogo', aspect: OUT_V.w / (OUT_V.h - ch) });
+    const r = [{ id: 'cam', label: 'Cima', aspect: OUT_V.w / ch }];
+    if (st.streamer.bottom !== 'media') r.push({ id: 'game', label: 'Baixo', aspect: OUT_V.w / (OUT_V.h - ch) });
     return r;
   }
   return [];
@@ -456,6 +458,14 @@ function getRanges() {
   return parts.map(r => ({ start: Math.max(st.start, r.start), end: Math.min(st.end, r.end) }))
     .filter(r => r.end - r.start > 0.05);
 }
+function rangeOccurrences(ranges, index) {
+  const range = ranges[index];
+  if (!range) return { count: 0, position: -1 };
+  const matches = ranges.map((other, i) => ({ other, i }))
+    .filter(({ other }) => Math.abs(other.start - range.start) < 0.01 && Math.abs(other.end - range.end) < 0.01)
+    .map(({ i }) => i);
+  return { count: matches.length, position: matches.indexOf(index) };
+}
 
 function updateTimelineTools() {
   const hasElement = !!elementEditor?.selected();
@@ -478,6 +488,8 @@ function updateTimelineTools() {
 function selectPartAt(t) {
   const ranges = getRanges();
   if (!ranges.length) return;
+  const active = ranges[st.activePart];
+  if (active && t >= active.start && t <= active.end) return active;
   let i = ranges.findIndex(r => t >= r.start && t <= r.end);
   if (i < 0) i = ranges.reduce((best, r, n) => {
     const distance = Math.min(Math.abs(t - r.start), Math.abs(t - r.end));
@@ -551,12 +563,19 @@ function updateTimeline() {
   }
   if (ranges.length && st.end - ranges.at(-1).end > 0.05) addRemovedInterval(ranges.at(-1).end, st.end);
   const clips = ranges.map((r, i) => {
+    const occurrence = rangeOccurrences(ranges, i), repeated = occurrence.count > 1;
     const range = document.createElement('button');
     range.type = 'button';
-    range.className = 'range' + (i === st.activePart ? ' active' : '');
+    range.className = 'range' + (i === st.activePart ? ' active' : '') + (repeated && occurrence.position > 0 ? ' duplicate' : '');
     range.style.left = pct(r.start);
     range.style.width = `${Math.max(0, (sourceToEdit(r.end) - sourceToEdit(r.start)) / (editDuration() || 1) * 100)}%`;
-    range.title = `Segmento ${i + 1}: ${fmt(sourceToEdit(r.start))} – ${fmt(sourceToEdit(r.end))}`;
+    if (repeated) {
+      const height = Math.min(10, 30 / occurrence.count);
+      range.style.top = `${2 + occurrence.position * height}px`;
+      range.style.height = `${height}px`;
+    }
+    const copyLabel = repeated ? (occurrence.position ? ` · cópia ${occurrence.position + 1}/${occurrence.count}` : ` · origem de ${occurrence.count} ocorrências`) : '';
+    range.title = `Segmento ${i + 1}${copyLabel}: ${fmt(sourceToEdit(r.start))} – ${fmt(sourceToEdit(r.end))} · ordem de exportação ${i + 1}`;
     range.setAttribute('aria-label', range.title);
     range.setAttribute('aria-pressed', String(i === st.activePart));
     range.textContent = `${i + 1} · ${fmt(r.end - r.start)}`;
@@ -750,6 +769,18 @@ function splitPart() {
   updateTimeline();
   recordVideoEdit(before);
 }
+function duplicatePart(index = st.activePart) {
+  if (!st.mp4 || st.busy) return;
+  const ranges = getRanges(), range = ranges[index];
+  if (!range) return;
+  const before = beginVideoEdit();
+  st.parts = ranges.map(part => ({ ...part }));
+  st.parts.splice(index + 1, 0, { ...range });
+  st.activePart = index + 1;
+  updateTimeline();
+  recordVideoEdit(before);
+  setStatus('Segmento duplicado a seguir ao original na exportação.');
+}
 function deletePart() {
   if (!st.mp4 || st.busy) return;
   const ranges = getRanges();
@@ -766,6 +797,7 @@ function rippleDeletePart() {
   if (!st.mp4 || st.busy) return;
   const ranges = getRanges(), r = ranges[st.activePart];
   if (ranges.length < 2 || !r) return;
+  if (rangeOccurrences(ranges, st.activePart).count > 1) return deletePart();
   const before = beginVideoEdit();
   st.parts = ranges.map(x => ({ ...x }));
   st.parts.splice(st.activePart, 1);
@@ -828,8 +860,10 @@ function showRemoveMenu(e) {
   e.stopPropagation();
   videoMenuTarget = { kind: 'toolbar' };
   videoMenu.querySelector('[data-video-action="split"]').hidden = true;
+  videoMenu.querySelector('[data-video-action="duplicate"]').hidden = true;
+  videoMenu.querySelector('[data-video-action="openSegment"]').hidden = true;
   videoMenu.querySelector('[data-video-action="delete"]').hidden = false;
-  videoMenu.querySelector('[data-video-action="rippleDelete"]').hidden = false;
+  videoMenu.querySelector('[data-video-action="rippleDelete"]').hidden = rangeOccurrences(getRanges(), st.activePart).count > 1;
   videoMenu.querySelector('[data-video-action="restore"]').hidden = true;
   videoMenu.querySelector('[data-video-action="restoreAll"]').hidden = true;
   videoMenu.hidden = false;
@@ -868,8 +902,10 @@ function showVideoMenu(e) {
   splitAction.hidden = gap;
   splitAction.disabled = gap || !range || video.currentTime <= range.start + .15 || video.currentTime >= range.end - .15;
   splitAction.title = splitAction.disabled && !gap ? 'Clica mais longe das pontas para dividir' : '';
+  videoMenu.querySelector('[data-video-action="duplicate"]').hidden = gap;
+  videoMenu.querySelector('[data-video-action="openSegment"]').hidden = gap;
   videoMenu.querySelector('[data-video-action="delete"]').hidden = gap || getRanges().length < 2;
-  videoMenu.querySelector('[data-video-action="rippleDelete"]').hidden = gap || getRanges().length < 2;
+  videoMenu.querySelector('[data-video-action="rippleDelete"]').hidden = gap || getRanges().length < 2 || rangeOccurrences(getRanges(), videoMenuTarget.index).count > 1;
   videoMenu.querySelector('[data-video-action="restore"]').hidden = !gap;
   videoMenu.querySelector('[data-video-action="restoreAll"]').hidden = gap || !(st.parts?.length || st.start > .05 || st.end < st.dur - .05);
   videoMenu.hidden = false;
@@ -889,6 +925,8 @@ videoMenu.addEventListener('click', e => {
   if (!action || !target) return;
   closeVideoMenu();
   if (action === 'split') splitPart();
+  else if (action === 'duplicate') duplicatePart(target.index);
+  else if (action === 'openSegment') openSegmentInNewTab(getRanges()[target.index]);
   else if (action === 'delete') deletePart();
   else if (action === 'rippleDelete') rippleDeletePart();
   else if (action === 'restore') restoreGap(target.start, target.end);
@@ -1401,9 +1439,10 @@ async function replaceLibraryFile(id, file) {
 
 (async () => {
   try {
-    [st.library, st.templates] = await Promise.all([listMedia(), listTemplates()]);
+    [st.library, st.templates, st.recentClips] = await Promise.all([listMedia(), listTemplates(), listRecentClips()]);
     navigator.storage?.persist?.();
     renderTemplates();
+    renderRecentClips();
     const tpl = st.templates.find((t) => t.id === tplCur);    // abre com o último template escolhido
     if (tpl) applyTemplateSnap(tpl);
     else if (st.layout === 'streamer') { buildRects(); renderOpts(); }
@@ -1697,6 +1736,58 @@ function renderTextOpts() {
 st.templates = [];
 let tplCur = loadJSON('sc.template', '');
 
+function renderRecentClips() {
+  const sel = $('#recentSel'), current = st.recentId;
+  sel.innerHTML = '<option value="">Recentes</option>' + st.recentClips.map((clip) => {
+    const date = new Date(clip.at).toLocaleDateString('pt-PT', { day: '2-digit', month: '2-digit' });
+    return `<option value="${esc(clip.id)}">${esc(clip.name)} · ${date}</option>`;
+  }).join('');
+  sel.value = st.recentClips.some((clip) => clip.id === current) ? current : '';
+  sel.disabled = st.recentClips.length === 0 || st.busy;
+}
+
+$('#recentSel').addEventListener('change', async (event) => {
+  const id = event.target.value;
+  if (!id || st.busy) return;
+  await saveSession();
+  history.replaceState(null, '', `${location.pathname}?recent=${encodeURIComponent(id)}`);
+  event.target.disabled = true;
+  try {
+    const clip = await loadRecentClip(id);
+    if (!clip?.blob) throw new Error('Este clip já não está disponível.');
+    await touchRecentClip(id);
+    st.recentId = id;
+    await loadClip(clip.blob, clip.name, clip.channel, true);
+    st.recentClips = await listRecentClips();
+    renderRecentClips();
+  } catch (error) {
+    setStatus('Não consegui abrir o clip recente: ' + error.message);
+    event.target.value = '';
+  } finally { event.target.disabled = false; }
+});
+async function openSegmentInNewTab(range) {
+  if (!range || !st.blob || st.busy) return;
+  const tab = window.open('', '_blank');
+  if (!tab) { setStatus('O browser bloqueou a nova aba.'); return; }
+  try {
+    await saveSession();
+    const recent = await saveRecentClip(st.blob, st.name, chanKey);
+    st.recentId = recent.id;
+    st.recentClips = await listRecentClips();
+    renderRecentClips();
+    const params = new URLSearchParams({
+      recent: recent.id,
+      branch: crypto.randomUUID(),
+      start: String(range.start),
+      end: String(range.end),
+    });
+    tab.location.replace(`${extURL('editor.html')}?${params}`);
+  } catch (error) {
+    tab.close();
+    setStatus('Não consegui preparar o segmento: ' + error.message);
+  }
+}
+
 function snapshot() {
   const s = st.streamer;
   return {
@@ -1712,15 +1803,13 @@ function snapshot() {
 function renderTemplates() {
   const sel = $('#tplSel'), list = st.templates.filter((t) => t.v === 2).sort((a, b) => a.name.localeCompare(b.name));
   if (!list.some((t) => t.id === tplCur)) tplCur = '';
-  sel.innerHTML = `<option value="">${list.length ? '— Template —' : 'Sem templates'}</option>` +
+  sel.innerHTML = `<option value="">${list.length ? 'Templates' : 'Sem templates'}</option>` +
     list.map((t) => `<option value="${t.id}"${t.id === tplCur ? ' selected' : ''}>${esc(t.name)}</option>`).join('');
   const current = list.find(t => t.id === tplCur);
   sel.title = current?.name || 'Escolher template';
-  const measure = document.createElement('canvas').getContext('2d');
-  measure.font = getComputedStyle(sel).font;
-  sel.style.setProperty('--template-width', Math.ceil(Math.max(360, measure.measureText(current?.name || '').width + 48)) + 'px');
   $('#tplUpdate').disabled = !current || templateWorking;
   $('#tplUpdate').title = current ? `Guardar alterações em «${current.name}»` : 'Seleciona um template para atualizar';
+  $('#tplUpdate').setAttribute('aria-label', $('#tplUpdate').title);
   if ($('#templatesDlg').open) renderTemplateList();
 }
 
@@ -1756,7 +1845,7 @@ $('#tplSel').addEventListener('change', (e) => {
   tplCur = t ? t.id : '';
   saveJSON('sc.template', tplCur);
   renderTemplates();
-  if (t) { applyTemplateSnap(t); setStatus(`Template «${t.name}» aplicado.`); }
+  if (t) { applyTemplateSnap(t); showToast(`Template «${t.name}» aplicado.`); }
   e.target.blur();
 });
 
@@ -1778,13 +1867,37 @@ function openTemplates(saveCurrent = false) {
   renderTemplateList(); $('#templatesDlg').showModal();
   if (saveCurrent) { $('#templateName').focus(); $('#templateName').select(); }
 }
+let toastTimer = 0;
+function showToast(message, type = 'success') {
+  const region = $('#toastRegion'), toast = document.createElement('div'), icon = document.createElement('span'), text = document.createElement('span');
+  clearTimeout(toastTimer);
+  toast.className = `toast${type === 'error' ? ' error' : ''}`;
+  icon.className = 'toastIcon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = type === 'error' ? '!' : '✓';
+  text.textContent = message;
+  toast.append(icon, text);
+  region.replaceChildren(toast);
+  requestAnimationFrame(() => toast.classList.add('show'));
+  toastTimer = setTimeout(() => {
+    toast.classList.remove('show');
+    setTimeout(() => toast.remove(), 180);
+  }, 3200);
+}
 async function templateMutation(action) {
   if (templateWorking || st.busy) return;
   templateWorking = true;
   const controls = [...document.querySelectorAll('#templatesDlg button, #templatesDlg input, .tpl button, .tpl select')].map(el => [el, el.disabled]);
   controls.forEach(([el]) => el.disabled = true);
-  try { await action(); renderTemplates(); }
-  catch (e) { const message = 'Não consegui guardar a alteração: ' + e.message; $('#templateMessage').textContent = message; setStatus(message); }
+  try {
+    const message = await action();
+    renderTemplates();
+    if (message) showToast(message);
+  } catch (e) {
+    const message = 'Não consegui guardar a alteração: ' + e.message;
+    $('#templateMessage').textContent = message;
+    showToast(message, 'error');
+  }
   finally { templateWorking = false; controls.forEach(([el, disabled]) => el.disabled = disabled); $('#tplUpdate').disabled = !tplCur; }
 }
 $('#tplUpdate').addEventListener('click', () => {
@@ -1794,7 +1907,7 @@ $('#tplUpdate').addEventListener('click', () => {
     const updated = { ...templateWithoutCaption(current), ...snapshot(), at: Date.now() };
     await putTemplate(updated);
     st.templates = st.templates.map(t => t.id === updated.id ? updated : t);
-    setStatus(`Alterações guardadas em «${updated.name}».`);
+    return `Alterações guardadas em «${updated.name}».`;
   });
 });
 $('#tplSave').addEventListener('click', () => openTemplates(true));
@@ -1811,8 +1924,9 @@ $('#templateSaveForm').addEventListener('submit', e => {
     await putTemplate(t);
     st.templates = [...st.templates.filter(x => x.id !== t.id), t];
     tplCur = t.id; saveJSON('sc.template', tplCur);
-    $('#templateMessage').textContent = `Template «${name}» guardado.`;
     $('#templateName').value = '';
+    $('#templatesDlg').close();
+    return `Template «${name}» criado.`;
   });
 });
 $('#templateList').addEventListener('click', e => {
@@ -1822,7 +1936,7 @@ $('#templateList').addEventListener('click', e => {
   if (!action || !t || templateWorking || st.busy) return;
   if (action === 'apply') {
     tplCur = t.id; saveJSON('sc.template', tplCur); applyTemplateSnap(t); renderTemplates();
-    $('#templatesDlg').close(); setStatus(`Template «${t.name}» aplicado.`); return;
+    $('#templatesDlg').close(); showToast(`Template «${t.name}» aplicado.`); return;
   }
   if (action === 'delete' || action === 'cancel-delete') {
     templateDeleteId = action === 'delete' ? t.id : null;
@@ -1836,8 +1950,8 @@ $('#templateList').addEventListener('click', e => {
       await deleteTemplate(t.id);
       st.templates = st.templates.filter(x => x.id !== t.id);
       if (tplCur === t.id) { tplCur = ''; saveJSON('sc.template', ''); }
-      templateDeleteId = null; $('#templateMessage').textContent = `Template «${t.name}» apagado.`;
-      return;
+      templateDeleteId = null;
+      return `Template «${t.name}» apagado.`;
     }
     let updated;
     if (action === 'rename') {
@@ -1851,7 +1965,7 @@ $('#templateList').addEventListener('click', e => {
     } else return;
     await putTemplate(updated);
     st.templates = [...st.templates.filter(x => x.id !== updated.id), updated];
-    $('#templateMessage').textContent = action === 'rename' ? 'Nome atualizado.' : `Criado «${updated.name}».`;
+    return action === 'rename' ? `Template «${updated.name}» renomeado.` : `Template «${updated.name}» duplicado.`;
   });
 });
 
@@ -1860,17 +1974,20 @@ $('#templateList').addEventListener('click', e => {
 let sessionKey = '';
 function saveSession() {
   if (!sessionKey) return;
-  saveJSON('sc.session', {
+  const session = {
     key: sessionKey, start: st.start, end: st.end, parts: st.parts, activePart: st.activePart, rippleCuts: st.rippleCuts, keys: st.crop.keys,
     framing: st.framing,
     texts: st.texts.map(({ id, _box, ...rest }) => rest),
     images: cleanElements(st.images),
-  });
+    at: Date.now(),
+  };
+  saveJSON('sc.session', session);
+  return saveEditorSession(sessionKey, session).catch((error) => console.warn('sessão', error));
 }
 setInterval(saveSession, 2000);
 addEventListener('pagehide', saveSession);
-function restoreSession() {
-  const ss = loadJSON('sc.session', null);
+async function restoreSession() {
+  const ss = await loadEditorSession(sessionKey) || loadJSON('sc.session', null);
   if (!ss || ss.key !== sessionKey) return false;
   st.framing = normalizeFraming(ss.framing);
   st.start = clamp(ss.start, 0, st.dur);
@@ -1905,7 +2022,8 @@ function offsetElementTimes(fromDuration, toDuration) {
 }
 
 let clipLoadId = 0, clipURL = null;
-async function loadClip(blob, name, channel, fromStore = false) {
+async function loadClip(blob, name, channel, fromStore = false, initialRange = null, branchId = '') {
+  await saveSession();
   const loadId = ++clipLoadId;
   let url = null;
   try {
@@ -1946,16 +2064,32 @@ async function loadClip(blob, name, channel, fromStore = false) {
     const known = restoreCam();                     // depois de saber o tamanho real do vídeo
     st.dur = Math.min(st.dur, video.duration || st.dur);
     st.end = st.dur;
-    sessionKey = `${st.name}|${blob.size}`;
-    const resumed = restoreSession();
+    if (initialRange && Number.isFinite(initialRange.start) && Number.isFinite(initialRange.end)) {
+      const rangeStart = clamp(initialRange.start, 0, st.dur);
+      const rangeEnd = clamp(initialRange.end, rangeStart + 0.05, st.dur);
+      if (rangeEnd - rangeStart > 0.05) { st.start = rangeStart; st.end = rangeEnd; }
+    }
+    sessionKey = `${st.name}|${blob.size}${branchId ? `|branch:${branchId}` : ''}`;
+    const resumed = await restoreSession();
     if (pendingTemplateDuration != null) {
       if (!resumed) offsetElementTimes(pendingTemplateDuration, st.dur);
       pendingTemplateDuration = null;
     }
     normalizeElementTimes();
     // Guarda o clip (e o canal) para um refresh o voltar a abrir; tira o #pending do endereço.
-    if (!fromStore) saveLastClip(blob, st.name, channel).catch(() => {});
-    if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+    if (!fromStore) {
+      saveLastClip(blob, st.name, channel).catch(() => {});
+      saveRecentClip(blob, st.name, channel).then(async (recent) => {
+        if (loadId !== clipLoadId) return;
+        st.recentId = recent.id;
+        st.recentClips = await listRecentClips();
+        renderRecentClips();
+      }).catch((error) => console.warn('recentes', error));
+    }
+    if (!fromStore && (location.hash || location.search)) {
+      const devSource = DEV && new URLSearchParams(location.search).has('src') ? location.search : '';
+      history.replaceState(null, '', location.pathname + devSource);
+    }
     stage.classList.add('loaded');
     $('#fileName').textContent = st.name;
     $('#fileName').classList.remove('muted');
@@ -1990,11 +2124,15 @@ addEventListener('resize', placeRects);
 
 // O clip chega da aba da live (quem abriu o editor) por postMessage.
 // #pending = o editor abriu no clique e o clip ainda está a ser preparado.
-const pending = location.hash === '#pending';
+const editorParams = new URLSearchParams(location.search);
+const recentIdParam = editorParams.get('recent');
+const branchIdParam = editorParams.get('branch') || '';
+const initialRange = branchIdParam ? { start: Number(editorParams.get('start')), end: Number(editorParams.get('end')) } : null;
+const pending = location.hash === '#pending' || !!recentIdParam;
 const openedAt = Date.now();
 if (pending) {
-  $('#drop').textContent = 'A preparar o clip…';
-  setStatus('A preparar o clip na aba da live…');
+  $('#drop').textContent = recentIdParam ? 'A abrir o clip recente…' : 'A preparar o clip…';
+  setStatus(recentIdParam ? 'A abrir o clip recente…' : 'A preparar o clip na aba da live…');
 }
 addEventListener('message', (ev) => {
   const m = ev.data;
@@ -2009,6 +2147,19 @@ if (window.opener) window.opener.postMessage({ __scEd: 'ready' }, '*');
 // Plano B, se a mensagem da aba da live não chegar: o processador também guarda o clip no
 // IndexedDB. Com #pending espera-se por um clip mais recente do que esta aba; sem, abre o último.
 (async () => {
+  if (recentIdParam) {
+    try {
+      const clip = await loadRecentClip(recentIdParam);
+      if (!clip?.blob) throw new Error('Este clip já não está disponível.');
+      await touchRecentClip(recentIdParam);
+      st.recentId = recentIdParam;
+      return loadClip(clip.blob, clip.name, clip.channel, true, initialRange, branchIdParam);
+    } catch (error) {
+      $('#drop').textContent = 'Não consegui abrir o clip recente: ' + error.message;
+      setStatus($('#drop').textContent);
+      return;
+    }
+  }
   for (let i = 0; i < (pending ? 120 : 1); i++) {
     await new Promise((r) => setTimeout(r, pending ? 1000 : 300));
     if (st.mp4 || srcParam) return;

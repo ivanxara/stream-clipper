@@ -9,15 +9,19 @@
 <body>
   <header>
     <div class="brand"><span class="dot"></span> Stream Clipper</div>
-    <div class="tpl" title="Templates: guardam formato, câmara/jogo, imagem, posições e textos">
-      <select id="tplSel" aria-label="Template selecionado"><option value="">— Template —</option></select>
-      <button id="tplUpdate" class="btn small" title="Guardar as alterações no template selecionado" disabled>Atualizar</button>
-      <button id="tplSave" class="btn small" title="Guardar a edição como um novo template">Guardar novo</button>
-      <button id="tplManage" class="btn small" title="Renomear, duplicar ou apagar templates">Gerir</button>
+    <div class="tpl" aria-label="Templates">
+      <select id="tplSel" aria-label="Template selecionado"><option value="">Templates</option></select>
+      <button id="tplUpdate" class="btn iconOnly" aria-label="Atualizar template" title="Guardar alterações no template selecionado" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h13l3 3v13H4zM8 4v5h8V4M8 17h8M17 12l2 2 3-3"/></svg></button>
+      <button id="tplSave" class="btn iconOnly" aria-label="Guardar novo template" title="Guardar como novo template"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h10l4 4v14H5zM8 3v5h8V3M12 12v6m-3-3h6"/></svg></button>
+      <button id="tplManage" class="btn iconOnly" aria-label="Gerir templates" title="Gerir templates"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21v-7m0-4V3m8 18v-9m0-4V3m8 18v-5m0-4V3M1 14h6M9 8h6m2 8h6"/></svg></button>
     </div>
-    <div class="file"><span id="fileName" class="muted">Nenhum clip</span></div>
-    <label class="btn ghost small">Abrir clip…<input id="fileInput" type="file" accept="video/mp4,video/webm" hidden></label>
+    <div class="file" hidden><span id="fileName" class="muted">Nenhum clip</span></div>
+    <div class="headerActions">
+      <select id="recentSel" class="recentSel" aria-label="Abrir clip recente" title="Abrir um clip editado recentemente"><option value="">Recentes</option></select>
+      <label class="btn ghost small openClip" aria-label="Abrir clip" title="Abrir clip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3zM3 9h18"/></svg><span>Abrir</span><input id="fileInput" type="file" accept="video/mp4,video/webm" hidden></label>
+    </div>
   </header>
+  <div id="toastRegion" class="toastRegion" role="status" aria-live="polite" aria-atomic="true"></div>
 
   <main>
     <div id="stage" class="stage">
@@ -120,6 +124,8 @@
   </div>
   <div id="videoContextMenu" class="elementContextMenu" role="menu" aria-label="Ações do vídeo" hidden>
     <button role="menuitem" data-video-action="split">Dividir aqui <kbd>Ctrl B</kbd></button>
+    <button role="menuitem" data-video-action="duplicate">Duplicar segmento</button>
+    <button role="menuitem" data-video-action="openSegment">Abrir segmento noutra aba</button>
     <button role="menuitem" data-video-action="delete">Remover, manter espaço <kbd>Del</kbd></button>
     <button role="menuitem" data-video-action="rippleDelete">Remover e deslocar o resto <kbd>Shift Del</kbd></button>
     <button role="menuitem" data-video-action="restore">Repor trecho</button>
@@ -131,7 +137,6 @@
       <form id="templateSaveForm" class="templateSaveForm">
         <label for="templateName">Guardar como novo template</label>
         <div class="row"><input id="templateName" maxlength="80" placeholder="Nome do novo template" required><button class="btn small" type="submit">Criar template</button></div>
-        <p class="muted small">Para guardar alterações no template selecionado, usa «Atualizar» na barra de cima.</p>
       </form>
       <p id="templateMessage" class="muted small" role="status"></p>
       <div id="templateList" class="templateList"></div>
@@ -142,7 +147,7 @@
       <div class="hrow"><b id="helpTitle">Ajuda e atalhos</b><button class="btn small" aria-label="Fechar ajuda" autofocus>✕</button></div>
       <p>Seleciona um elemento no visor ou na timeline. Arrasta para mover, usa os cantos para redimensionar e a pega ↻ para rodar.</p>
       <p>Em «Adicionar elemento» → «Ficheiro», carrega imagens, GIFs ou vídeos MOV/MP4 e clica numa miniatura para adicionar ao visor. GIFs e vídeos repetem sem som durante o intervalo do elemento; a animação também fica na exportação.</p>
-      <p>Na timeline, arrasta o marcador amarelo ou a régua de tempo para percorrer o vídeo. Com um elemento selecionado, Início/Fim e Dividir atuam nesse elemento; sem seleção, atuam no vídeo. Em «Remover», escolhe se o espaço fica vazio ou se o conteúdo seguinte avança para o ocupar. O marcador ↶ repõe qualquer corte; no menu do vídeo podes repor o vídeo completo.</p>
+      <p>Na timeline, arrasta o marcador amarelo ou a régua de tempo para percorrer o vídeo. Com um elemento selecionado, Início/Fim e Dividir atuam nesse elemento; sem seleção, atuam no vídeo. No botão direito de um segmento, «Duplicar segmento» insere uma cópia imediatamente a seguir na exportação; «Abrir segmento noutra aba» cria uma edição independente só desse intervalo. Em «Remover», escolhe se o espaço fica vazio ou se o conteúdo seguinte avança para o ocupar. O marcador ↶ repõe qualquer corte; no menu do vídeo podes repor o vídeo completo.</p>
       <p>No Streamer, arrasta a divisão verde para ajustar a altura da câmara. Clica na zona de baixo para mover o conteúdo e ajustar o zoom pelos cantos da moldura azul.</p>
       <p>No Desfocado e Original, usa «Zoom do vídeo», os botões − / + ou a roda do rato sobre o vídeo para aproximar até 400%. Arrasta para enquadrar e usa «Repor enquadramento» para voltar ao início. O zoom fica no vídeo exportado.</p>
       <dl class="shortcutList">
