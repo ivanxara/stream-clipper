@@ -5,7 +5,7 @@
 import { parseMp4 } from './mp4.js';
 import { FFmpeg } from './lib/ffmpeg/index.js';
 import { loadLastClip, saveLastClip, listRecentClips, loadRecentClip, saveRecentClip, touchRecentClip, loadEditorSession, saveEditorSession, listMedia, putMedia, deleteMedia, listTemplates, putTemplate, deleteTemplate} from './clipstore.js';
-import { importMediaFile, openMediaReader, usesFrameReader, isGif } from './media.js';
+import { importMediaFile, inspectVideoFile, openMediaReader, usesFrameReader, isGif } from './media.js';
 import { createElementEditor, elementVisible, orderedElements, cleanElements } from './elements.js';
 
 const $ = (s) => document.querySelector(s);
@@ -16,6 +16,7 @@ const fmt = (t) => { const m = Math.floor(t / 60), s = t - m * 60; return `${m}:
 const OUT_V = { w: 1080, h: 1920 };
 
 const video = $('#src');
+const sequenceVideo = $('#sequenceSrc');
 const stage = $('#stage');
 const overlay = $('#overlay');
 const preview = $('#preview');
@@ -38,6 +39,9 @@ const st = {
   recentClips: [],
   recentId: '',
   images: [],
+  audioTracks: [],
+  audioSel: null,
+  sequenceClips: [],
   busy: false,
 };
 
@@ -48,6 +52,7 @@ function videoSnapshot() {
   return {
     start: st.start, end: st.end, parts: structuredClone(st.parts), activePart: st.activePart,
     rippleCuts: structuredClone(st.rippleCuts),
+    audioTracks: structuredClone(st.audioTracks), audioSel: st.audioSel,
     layout: st.layout, streamer: structuredClone(st.streamer), keys: structuredClone(st.crop.keys),
     framing: structuredClone(st.framing),
     cropDefault: loadJSON('sc.crop', null),
@@ -71,6 +76,8 @@ function recordVideoEdit(before) {
 function restoreVideoEdit(s) {
   video.pause();
   Object.assign(st, { start: s.start, end: s.end, parts: structuredClone(s.parts), activePart: s.activePart, rippleCuts: structuredClone(s.rippleCuts || []) });
+  st.audioTracks = structuredClone(s.audioTracks || []);
+  st.audioSel = s.audioSel || null;
   st.streamer = structuredClone(s.streamer);
   st.framing = normalizeFraming(s.framing);
   st.crop.keys = structuredClone(s.keys);
@@ -81,6 +88,8 @@ function restoreVideoEdit(s) {
   placeRects();
   updateSplitUi();
   updateTimeline();
+  renderAudioTracks();
+  renderTextOpts();
   savePrefs();
   rememberCam();
   saveSession();
@@ -92,6 +101,7 @@ function editHistory(redo = false) {
   const entry = source.pop();
   if (!entry) return;
   if (entry.kind === 'video') restoreVideoEdit(redo ? entry.after : entry.before);
+  else if (entry.kind === 'sequence-delete') restoreSequenceDelete(entry, !redo);
   else elementEditor?.undo(redo);
   target.push(entry);
   refreshEditButtons();
@@ -293,26 +303,97 @@ function sizeResult() {
 }
 new ResizeObserver(() => { sizeResult(); placeRects(); }).observe(stage);
 
+const sequenceFitCanvas = new OffscreenCanvas(16, 16);
+function sequenceStart(index) {
+  return editDuration() + st.sequenceClips.slice(0, index).reduce((sum, clip) => sum + sequenceClipLength(clip), 0);
+}
+function currentTimelineTime() {
+  if (activeSequenceIndex >= 0) {
+    const clip = st.sequenceClips[activeSequenceIndex];
+    return clip ? sequenceStart(activeSequenceIndex) + clamp(sequenceVideo.currentTime - (clip.trimStart || 0), 0, sequenceClipLength(clip)) : editDuration();
+  }
+  return sourceToEdit(video.currentTime || 0);
+}
+function fittedSequenceSource(src) {
+  if (sequenceFitCanvas.width !== st.srcW || sequenceFitCanvas.height !== st.srcH) {
+    sequenceFitCanvas.width = st.srcW; sequenceFitCanvas.height = st.srcH;
+  }
+  const ctx = sequenceFitCanvas.getContext('2d', { alpha: false });
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, st.srcW, st.srcH);
+  const scale = Math.min(st.srcW / src.videoWidth, st.srcH / src.videoHeight);
+  const w = src.videoWidth * scale, h = src.videoHeight * scale;
+  ctx.drawImage(src, (st.srcW - w) / 2, (st.srcH - h) / 2, w, h);
+  return sequenceFitCanvas;
+}
+function activateSequenceClip(index, offset = 0, autoplay = false) {
+  const clip = st.sequenceClips[index], media = clip && libItem(clip.mediaId);
+  if (!clip || !media?.blob) return false;
+  video.pause();
+  if (activeSequenceIndex !== index || !sequenceVideo.src) {
+    sequenceVideo.pause();
+    if (sequenceURL) URL.revokeObjectURL(sequenceURL);
+    sequenceURL = URL.createObjectURL(media.sourceBlob || media.blob);
+    sequenceVideo.src = sequenceURL;
+  }
+  activeSequenceIndex = index;
+  st.audioSel = null; elementEditor?.select(null);
+  video.hidden = true; sequenceVideo.hidden = false; overlay.hidden = true;
+  const seek = () => {
+    sequenceVideo.currentTime = clamp((clip.trimStart || 0) + offset, clip.trimStart || 0, Math.max(clip.trimStart || 0, (clip.trimEnd ?? clip.dur) - .01));
+    if (autoplay) sequenceVideo.play().catch(() => {});
+  };
+  if (sequenceVideo.readyState >= 1) seek(); else sequenceVideo.addEventListener('loadedmetadata', seek, { once: true });
+  updateTimeline();
+  return true;
+}
+function activatePrimaryClip(time = st.start, autoplay = false) {
+  sequenceVideo.pause(); activeSequenceIndex = -1;
+  sequenceVideo.hidden = true; video.hidden = false; overlay.hidden = false;
+  video.currentTime = clamp(time, 0, st.dur);
+  if (autoplay) video.play().catch(() => {});
+  updateTimeline();
+}
+
+function resetSequencePreview() {
+  sequenceVideo.pause();
+  sequenceVideo.removeAttribute('src');
+  sequenceVideo.load();
+  if (sequenceURL) URL.revokeObjectURL(sequenceURL);
+  sequenceURL = null; activeSequenceIndex = -1;
+  sequenceVideo.hidden = true; video.hidden = false; overlay.hidden = false;
+}
+
 function loopPreview() {
   syncMediaTime();
-  if (st.mp4 && video.readyState >= 2) {
+  syncAudioPreview();
+  const activeVideo = activeSequenceIndex >= 0 ? sequenceVideo : video;
+  if (st.mp4 && activeVideo.readyState >= 2) {
     const { w, h } = outSize();
     const dpr = Math.min(2, devicePixelRatio || 1);
     const pw = Math.min(w, Math.round(resultBox.clientWidth * dpr)), ph = Math.round((pw * h) / w);
     if (pw > 0 && (preview.width !== pw || preview.height !== ph)) { preview.width = pw; preview.height = ph; }
-    renderFrame(pctx, video, video.videoWidth, video.videoHeight, video.currentTime, preview.width, preview.height, () => previewMediaFor(st.streamer.mediaId));
+    const source = activeSequenceIndex >= 0 ? fittedSequenceSource(activeVideo) : activeVideo;
+    const sw = activeSequenceIndex >= 0 ? st.srcW : activeVideo.videoWidth, sh = activeSequenceIndex >= 0 ? st.srcH : activeVideo.videoHeight;
+    renderFrame(pctx, source, sw, sh, currentTimelineTime(), preview.width, preview.height, () => previewMediaFor(st.streamer.mediaId));
   }
   elementEditor?.update();
   updateSplitUi();
   syncFramingUi();
-  if (!video.paused) {
+  if (activeSequenceIndex >= 0 && !sequenceVideo.paused) {
+    const clip = st.sequenceClips[activeSequenceIndex];
+    if (clip && sequenceVideo.currentTime >= (clip.trimEnd ?? clip.dur) - .01) {
+      if (!activateSequenceClip(activeSequenceIndex + 1, 0, true)) activatePrimaryClip(getRanges()[0]?.start ?? st.start, true);
+    }
+  } else if (activeSequenceIndex < 0 && !video.paused) {
     const ranges = getRanges();
     let i = ranges.findIndex(r => video.currentTime >= r.start && video.currentTime < r.end);
     if (i < 0) {
       const next = ranges.find(r => r.start > video.currentTime);
       video.currentTime = next ? next.start : ranges[0]?.start || st.start;
     } else if (video.currentTime >= ranges[i].end - 0.01) {
-      video.currentTime = ranges[i + 1]?.start ?? ranges[0]?.start ?? st.start;
+      if (ranges[i + 1]) video.currentTime = ranges[i + 1].start;
+      else if (st.sequenceClips.length) activateSequenceClip(0, 0, true);
+      else video.currentTime = ranges[0]?.start ?? st.start;
     }
   }
   if (st.layout === 'crop' || drag) placeRects();                                    // a moldura segue as posições
@@ -430,6 +511,7 @@ function setCropKey(t, r) {
 
 // ---------- barra de tempo ----------
 const tl = $('#timeline');
+let activeSequenceIndex = -1, sequenceURL = null;
 function sourceToEdit(time) {
   let removed = 0;
   for (const cut of [...(st.rippleCuts || [])].sort((a, b) => a.start - b.start)) {
@@ -449,8 +531,11 @@ function editToSource(time) {
   return time + removed;
 }
 const editDuration = () => sourceToEdit(st.dur);
-const editPct = (time) => (editDuration() ? (time / editDuration()) * 100 : 0) + '%';
-const tAt = (clientX) => { const r = tl.getBoundingClientRect(); return clamp((clientX - r.left) / r.width, 0, 1) * editDuration(); };
+const sequenceClipLength = clip => Math.max(0, (clip.trimEnd ?? clip.dur) - (clip.trimStart || 0));
+const queuedDuration = () => st.sequenceClips.reduce((sum, clip) => sum + sequenceClipLength(clip), 0);
+const timelineDuration = () => editDuration() + queuedDuration();
+const editPct = (time) => (timelineDuration() ? (time / timelineDuration()) * 100 : 0) + '%';
+const tAt = (clientX) => { const r = tl.getBoundingClientRect(); return clamp((clientX - r.left) / r.width, 0, 1) * timelineDuration(); };
 const pct = (sourceTime) => editPct(sourceToEdit(sourceTime));
 
 function getRanges() {
@@ -467,22 +552,225 @@ function rangeOccurrences(ranges, index) {
   return { count: matches.length, position: matches.indexOf(index) };
 }
 
+// Faixas de música usam o relógio visível da timeline. O ficheiro nunca é
+// alterado: start posiciona-o; trimStart/trimEnd escolhem a parte que se ouve.
+const audioItem = () => st.audioTracks.find(track => track.id === st.audioSel);
+const audioLength = track => Math.max(0, track.trimEnd - track.trimStart);
+const audioEnd = track => Math.min(timelineDuration(), track.start + audioLength(track));
+function normalizeAudioTracks() {
+  const duration = timelineDuration();
+  st.audioTracks = st.audioTracks.filter(track => track?.mediaId).map(track => {
+    const media = libItem(track.mediaId), max = Math.max(.05, media?.dur || track.trimEnd || .05);
+    track.trimStart = clamp(Number.isFinite(track.trimStart) ? track.trimStart : 0, 0, Math.max(0, max - .05));
+    track.trimEnd = clamp(Number.isFinite(track.trimEnd) ? track.trimEnd : max, track.trimStart + .05, max);
+    track.start = clamp(Number.isFinite(track.start) ? track.start : 0, 0, Math.max(0, duration - .05));
+    track.volume = clamp(Number.isFinite(track.volume) ? track.volume : .35, 0, 2);
+    track.fadeIn = clamp(Number.isFinite(track.fadeIn) ? track.fadeIn : 0, 0, audioLength(track) / 2);
+    track.fadeOut = clamp(Number.isFinite(track.fadeOut) ? track.fadeOut : 0, 0, audioLength(track) / 2);
+    track.muted = !!track.muted;
+    return track;
+  });
+  if (!audioItem()) st.audioSel = null;
+}
+
+const audioPreview = new Map();
+function disposeAudioPreview(id) {
+  const p = audioPreview.get(id);
+  if (!p) return;
+  p.el.pause(); p.el.removeAttribute('src'); p.el.load(); URL.revokeObjectURL(p.url); audioPreview.delete(id);
+}
+function audioPreviewFor(track) {
+  let p = audioPreview.get(track.id);
+  if (p) return p;
+  const media = libItem(track.mediaId);
+  if (!media) return null;
+  const el = new Audio(), url = URL.createObjectURL(media.sourceBlob || media.blob);
+  Object.assign(el, { src: url, preload: 'auto' });
+  p = { el, url, mediaId: media.id };
+  audioPreview.set(track.id, p);
+  return p;
+}
+function syncAudioPreview(force = false) {
+  if (!st.mp4) return;
+  const now = currentTimelineTime(), paused = activeSequenceIndex >= 0 ? sequenceVideo.paused : video.paused;
+  for (const track of st.audioTracks) {
+    const p = audioPreviewFor(track);
+    if (!p) continue;
+    const local = track.trimStart + now - track.start, length = audioLength(track);
+    const active = !st.busy && !track.muted && now >= track.start && now < track.start + length && local < track.trimEnd;
+    if (!active) { p.el.pause(); continue; }
+    const into = local - track.trimStart, left = track.trimEnd - local;
+    let gain = track.volume;
+    if (track.fadeIn > 0) gain *= clamp(into / track.fadeIn, 0, 1);
+    if (track.fadeOut > 0) gain *= clamp(left / track.fadeOut, 0, 1);
+    p.el.volume = clamp(gain, 0, 1);
+    if (p.el.readyState && (force || p.el.seeking || Math.abs(p.el.currentTime - local) > (paused ? .025 : .2))) {
+      try { p.el.currentTime = clamp(local, 0, p.el.duration || track.trimEnd); } catch {}
+    }
+    if (paused) p.el.pause(); else if (p.el.paused) p.el.play().catch(() => {});
+  }
+  for (const [id] of audioPreview) if (!st.audioTracks.some(track => track.id === id)) disposeAudioPreview(id);
+}
+
+function selectAudio(id, showPanel = true) {
+  st.audioSel = st.audioTracks.some(track => track.id === id) ? id : null;
+  if (st.audioSel) elementEditor?.select(null);
+  renderAudioTracks();
+  updateTimelineTools();
+  if (showPanel) renderTextOpts();
+}
+function removeAudio(id = st.audioSel) {
+  const track = st.audioTracks.find(item => item.id === id);
+  if (!track || st.busy) return;
+  const before = beginVideoEdit();
+  st.audioTracks = st.audioTracks.filter(item => item.id !== id);
+  disposeAudioPreview(id);
+  if (st.audioSel === id) st.audioSel = null;
+  renderAudioTracks(); renderTextOpts(); updateTimelineTools(); recordVideoEdit(before);
+}
+function splitAudio() {
+  const track = audioItem(), t = currentTimelineTime();
+  if (!track || t <= track.start + .05 || t >= audioEnd(track) - .05) return false;
+  const before = beginVideoEdit(), cut = track.trimStart + t - track.start;
+  const right = { ...track, id: crypto.randomUUID(), start: t, trimStart: cut };
+  track.trimEnd = cut;
+  st.audioTracks.splice(st.audioTracks.indexOf(track) + 1, 0, right);
+  st.audioSel = right.id;
+  renderAudioTracks(); renderTextOpts(); recordVideoEdit(before);
+  return true;
+}
+function removeSequenceClip(index = activeSequenceIndex) {
+  const clip = st.sequenceClips[index];
+  if (!clip || st.busy) return;
+  const mediaId = clip.mediaId, media = libItem(mediaId);
+  const entry = { kind: 'sequence-delete', index, clip: structuredClone(clip), media,
+    audioBefore: structuredClone(st.audioTracks), audioSelBefore: st.audioSel };
+  st.sequenceClips.splice(index, 1);
+  if (!st.sequenceClips.some(item => item.mediaId === mediaId)) {
+    st.library = st.library.filter(item => item.id !== mediaId);
+    deleteMedia(mediaId).catch(() => {});
+  }
+  if (activeSequenceIndex === index) activatePrimaryClip(getRanges().at(-1)?.end ?? st.start, false);
+  else activeSequenceIndex = Math.min(activeSequenceIndex, st.sequenceClips.length - 1);
+  normalizeAudioTracks(); updateTimeline(); renderTextOpts(); saveSession();
+  entry.audioAfter = structuredClone(st.audioTracks); entry.audioSelAfter = st.audioSel;
+  recordEdit(entry);
+  setStatus(`«${clip.name}» removido da sequência.`);
+}
+
+function restoreSequenceDelete(entry, restore) {
+  video.pause(); sequenceVideo.pause();
+  if (restore) {
+    if (entry.media && !libItem(entry.media.id)) {
+      st.library.push(entry.media);
+      putMedia(entry.media).catch(error => console.warn('restaurar vídeo da sequência', error));
+    }
+    if (!st.sequenceClips.some(clip => clip.id === entry.clip.id)) {
+      st.sequenceClips.splice(clamp(entry.index, 0, st.sequenceClips.length), 0, structuredClone(entry.clip));
+    }
+    st.audioTracks = structuredClone(entry.audioBefore || st.audioTracks);
+    st.audioSel = entry.audioSelBefore || null;
+    activateSequenceClip(st.sequenceClips.findIndex(clip => clip.id === entry.clip.id), 0, false);
+    setStatus(`«${entry.clip.name}» restaurado.`);
+  } else {
+    const index = st.sequenceClips.findIndex(clip => clip.id === entry.clip.id);
+    if (index >= 0) st.sequenceClips.splice(index, 1);
+    if (!st.sequenceClips.some(clip => clip.mediaId === entry.clip.mediaId)) {
+      st.library = st.library.filter(item => item.id !== entry.clip.mediaId);
+      deleteMedia(entry.clip.mediaId).catch(() => {});
+    }
+    st.audioTracks = structuredClone(entry.audioAfter || st.audioTracks);
+    st.audioSel = entry.audioSelAfter || null;
+    if (activeSequenceIndex === index || !st.sequenceClips[activeSequenceIndex]) activatePrimaryClip(getRanges().at(-1)?.end ?? st.start, false);
+    else if (index >= 0 && activeSequenceIndex > index) activeSequenceIndex--;
+    setStatus(`«${entry.clip.name}» removido novamente.`);
+  }
+  syncAudioPreview(true); updateTimeline(); renderAudioTracks(); renderTextOpts(); saveSession();
+}
+function splitSequenceClip() {
+  const clip = st.sequenceClips[activeSequenceIndex];
+  if (!clip) return false;
+  const cut = sequenceVideo.currentTime;
+  if (cut <= (clip.trimStart || 0) + .05 || cut >= (clip.trimEnd ?? clip.dur) - .05) return false;
+  const right = { ...clip, id: crypto.randomUUID(), trimStart: cut };
+  clip.trimEnd = cut;
+  st.sequenceClips.splice(activeSequenceIndex + 1, 0, right);
+  activeSequenceIndex++;
+  activateSequenceClip(activeSequenceIndex, 0, false); saveSession();
+  return true;
+}
+function renderAudioTracks() {
+  const wrap = $('#audioTracks');
+  if (!wrap) return;
+  normalizeAudioTracks();
+  const duration = timelineDuration() || 1, pctTime = time => clamp(time / duration * 100, 0, 100);
+  wrap.innerHTML = st.audioTracks.map(track => {
+    const media = libItem(track.mediaId), end = audioEnd(track);
+    return `<div class="audioTrackRow"><span class="trackLabel"><button class="audioMute" data-audio-mute="${esc(track.id)}" title="${track.muted ? 'Ativar' : 'Silenciar'} ${esc(media?.name || 'áudio')}">${track.muted ? '🔇' : '♪'}</button><span>${esc(media?.name || 'Áudio')}</span></span><div class="audioLane"><div class="audioBlock${track.id === st.audioSel ? ' on' : ''}${track.muted ? ' muted' : ''}" data-audio="${esc(track.id)}" style="left:${pctTime(track.start)}%;width:${Math.max(.2, pctTime(end - track.start))}%" role="button" tabindex="0" aria-label="${esc(media?.name || 'Áudio')}: ${fmt(track.start)} a ${fmt(end)}"><span class="audioGrip" data-audio-edge="in"></span><span class="audioWave">${esc(media?.name || 'Áudio')}</span><span class="audioGrip end" data-audio-edge="out"></span></div></div></div>`;
+  }).join('');
+}
+
+$('#audioTracks').addEventListener('click', event => {
+  const mute = event.target.closest('[data-audio-mute]');
+  if (mute) {
+    const track = st.audioTracks.find(item => item.id === mute.dataset.audioMute);
+    if (!track) return;
+    const before = beginVideoEdit(); track.muted = !track.muted; syncAudioPreview(true); renderAudioTracks(); recordVideoEdit(before); return;
+  }
+  const block = event.target.closest('[data-audio]');
+  if (block) selectAudio(block.dataset.audio);
+});
+$('#audioTracks').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && event.target.dataset.audio) selectAudio(event.target.dataset.audio);
+});
+$('#audioTracks').addEventListener('pointerdown', event => {
+  const block = event.target.closest('[data-audio]');
+  if (!block || event.button !== 0 || st.busy) return;
+  const track = st.audioTracks.find(item => item.id === block.dataset.audio);
+  if (!track) return;
+  event.preventDefault(); event.stopPropagation(); video.pause(); selectAudio(track.id, false);
+  const before = beginVideoEdit(), initial = { ...track }, lane = block.parentElement.getBoundingClientRect();
+  const edge = event.target.dataset.audioEdge, x0 = event.clientX, duration = timelineDuration();
+  block.setPointerCapture(event.pointerId);
+  const move = ev => {
+    const dt = (ev.clientX - x0) / lane.width * duration;
+    if (edge === 'in') {
+      const next = clamp(initial.start + dt, 0, initial.start + audioLength(initial) - .05);
+      track.trimStart = initial.trimStart + next - initial.start; track.start = next;
+    } else if (edge === 'out') {
+      track.trimEnd = clamp(initial.trimEnd + dt, initial.trimStart + .05, libItem(track.mediaId)?.dur || initial.trimEnd);
+    } else track.start = clamp(initial.start + dt, 0, Math.max(0, duration - .05));
+    const endTime = audioEnd(track);
+    block.style.left = `${clamp(track.start / duration * 100, 0, 100)}%`;
+    block.style.width = `${Math.max(.2, clamp((endTime - track.start) / duration * 100, 0, 100))}%`;
+    syncAudioPreview(true);
+  };
+  const end = ev => {
+    block.removeEventListener('pointermove', move); block.removeEventListener('pointerup', end); block.removeEventListener('pointercancel', end);
+    if (ev.type === 'pointercancel') Object.assign(track, initial);
+    renderAudioTracks(); renderTextOpts(); recordVideoEdit(before);
+  };
+  block.addEventListener('pointermove', move); block.addEventListener('pointerup', end); block.addEventListener('pointercancel', end);
+});
+
 function updateTimelineTools() {
   const hasElement = !!elementEditor?.selected();
+  const hasAudio = !!audioItem();
+  const hasSequence = activeSequenceIndex >= 0 && !!st.sequenceClips[activeSequenceIndex];
   const removeButton = $('#removeSegment');
-  removeButton.hidden = hasElement ? false : getRanges().length < 2;
-  removeButton.disabled = st.busy || (!hasElement && getRanges().length < 2);
-  removeButton.querySelector('span').textContent = hasElement ? 'Apagar elemento' : 'Remover';
-  removeButton.querySelector('.menuChevron').hidden = hasElement;
-  removeButton.title = hasElement ? 'Apagar elemento selecionado (Delete)' : 'Remover segmento selecionado';
+  removeButton.hidden = hasElement || hasAudio || hasSequence ? false : getRanges().length < 2;
+  removeButton.disabled = st.busy || (!hasElement && !hasAudio && !hasSequence && getRanges().length < 2);
+  removeButton.querySelector('span').textContent = hasSequence ? 'Apagar vídeo' : hasAudio ? 'Apagar áudio' : hasElement ? 'Apagar elemento' : 'Remover';
+  removeButton.querySelector('.menuChevron').toggleAttribute('hidden', hasElement || hasAudio || hasSequence);
+  removeButton.title = hasSequence ? 'Apagar vídeo adicional (Delete)' : hasAudio ? 'Apagar faixa de áudio (Delete)' : hasElement ? 'Apagar elemento selecionado (Delete)' : 'Remover segmento selecionado';
   removeButton.setAttribute('aria-label', removeButton.title);
-  removeButton.setAttribute('aria-haspopup', hasElement ? 'false' : 'menu');
-  $('#setIn').title = hasElement ? 'Marcar início do elemento selecionado (I)' : 'Marcar início (I)';
-  $('#setIn').setAttribute('aria-label', hasElement ? 'Marcar início do elemento (I)' : 'Marcar início (I)');
-  $('#setOut').title = hasElement ? 'Marcar fim do elemento selecionado (O)' : 'Marcar fim (O)';
-  $('#setOut').setAttribute('aria-label', hasElement ? 'Marcar fim do elemento (O)' : 'Marcar fim (O)');
-  $('#splitClip').title = hasElement ? 'Dividir elemento no cursor (Ctrl+B)' : 'Dividir segmento (Ctrl+B)';
-  $('#splitClip').setAttribute('aria-label', hasElement ? 'Dividir elemento (Ctrl+B)' : 'Dividir segmento (Ctrl+B)');
+  removeButton.setAttribute('aria-haspopup', hasElement || hasAudio || hasSequence ? 'false' : 'menu');
+  $('#setIn').title = hasSequence ? 'Cortar início do vídeo no cursor (I)' : hasAudio ? 'Cortar início do áudio no cursor (I)' : hasElement ? 'Marcar início do elemento selecionado (I)' : 'Marcar início (I)';
+  $('#setIn').setAttribute('aria-label', $('#setIn').title);
+  $('#setOut').title = hasSequence ? 'Cortar fim do vídeo no cursor (O)' : hasAudio ? 'Cortar fim do áudio no cursor (O)' : hasElement ? 'Marcar fim do elemento selecionado (O)' : 'Marcar fim (O)';
+  $('#setOut').setAttribute('aria-label', $('#setOut').title);
+  $('#splitClip').title = hasSequence ? 'Dividir vídeo no cursor (Ctrl+B)' : hasAudio ? 'Dividir áudio no cursor (Ctrl+B)' : hasElement ? 'Dividir elemento no cursor (Ctrl+B)' : 'Dividir segmento (Ctrl+B)';
+  $('#splitClip').setAttribute('aria-label', $('#splitClip').title);
 }
 
 function selectPartAt(t) {
@@ -501,6 +789,7 @@ function selectPartAt(t) {
 
 function updateTimeline() {
   elementEditor?.renderTracks();
+  renderAudioTracks();
   const ranges = getRanges(), wrap = $('#ranges');
   st.activePart = clamp(st.activePart, 0, Math.max(0, ranges.length - 1));
   const gaps = [], marks = [];
@@ -509,12 +798,12 @@ function updateTimeline() {
     removed.type = 'button';
     removed.className = 'cutGap';
     removed.style.left = pct(start);
-    removed.style.width = `${Math.max(0, (sourceToEdit(end) - sourceToEdit(start)) / (editDuration() || 1) * 100)}%`;
+    removed.style.width = `${Math.max(0, (sourceToEdit(end) - sourceToEdit(start)) / (timelineDuration() || 1) * 100)}%`;
     removed.dataset.start = start;
     removed.dataset.end = end;
     removed.title = `Repor trecho removido: ${fmt(start)} – ${fmt(end)}`;
     removed.setAttribute('aria-label', removed.title);
-    const gapWidth = editDuration() ? (sourceToEdit(end) - sourceToEdit(start)) / editDuration() * tl.clientWidth : 0;
+    const gapWidth = timelineDuration() ? (sourceToEdit(end) - sourceToEdit(start)) / timelineDuration() * tl.clientWidth : 0;
     removed.textContent = gapWidth >= 78 ? '↶ Repor trecho' : '↶';
     removed.addEventListener('pointerdown', e => e.stopPropagation());
     removed.addEventListener('click', e => { e.stopPropagation(); restoreGap(start, end); });
@@ -568,9 +857,9 @@ function updateTimeline() {
     range.type = 'button';
     range.className = 'range' + (i === st.activePart ? ' active' : '') + (repeated && occurrence.position > 0 ? ' duplicate' : '');
     range.style.left = pct(r.start);
-    range.style.width = `${Math.max(0, (sourceToEdit(r.end) - sourceToEdit(r.start)) / (editDuration() || 1) * 100)}%`;
+    range.style.width = `${Math.max(0, (sourceToEdit(r.end) - sourceToEdit(r.start)) / (timelineDuration() || 1) * 100)}%`;
     if (repeated) {
-      const height = Math.min(10, 30 / occurrence.count);
+      const height = Math.min(8, 25 / occurrence.count);
       range.style.top = `${2 + occurrence.position * height}px`;
       range.style.height = `${height}px`;
     }
@@ -582,7 +871,9 @@ function updateTimeline() {
     range.addEventListener('pointerdown', e => e.stopPropagation());
     range.addEventListener('click', e => {
       e.stopPropagation();
+      if (activeSequenceIndex >= 0) activatePrimaryClip(r.start, false);
       st.activePart = i;
+      st.audioSel = null;
       elementEditor?.select(null);
       video.pause();
       video.currentTime = e.detail === 0 ? r.start : clamp(editToSource(tAt(e.clientX)), r.start, r.end);
@@ -590,24 +881,43 @@ function updateTimeline() {
     });
     return range;
   });
-  wrap.replaceChildren(...gaps, ...clips, ...marks);
+  let sequenceOffset = editDuration();
+  const queued = st.sequenceClips.map((clip, i) => {
+    const start = sequenceOffset, length = sequenceClipLength(clip);
+    sequenceOffset += length;
+    const range = document.createElement('button');
+    range.type = 'button';
+    range.className = 'range sequenceRange' + (i === activeSequenceIndex ? ' active' : '');
+    range.style.left = editPct(start);
+    range.style.width = editPct(length);
+    range.title = `${clip.name}: ${fmt(start)} – ${fmt(start + length)} · vídeo pendente`;
+    range.setAttribute('aria-label', range.title);
+    range.setAttribute('aria-pressed', String(i === activeSequenceIndex));
+    range.textContent = `＋ ${clip.name} · ${fmt(length)}`;
+    range.addEventListener('pointerdown', event => event.stopPropagation());
+    range.addEventListener('click', event => { event.stopPropagation(); activateSequenceClip(i, 0, false); });
+    return range;
+  });
+  wrap.replaceChildren(...gaps, ...clips, ...marks, ...queued);
   $('#hIn').style.left = pct(st.start);
   $('#hOut').style.left = pct(st.end);
-  for (const id of ['play', 'setIn', 'setOut', 'splitClip']) $('#' + id).disabled = !st.mp4 || st.busy;
+  for (const id of ['play', 'setIn', 'setOut', 'splitClip', 'addVideo', 'addAudio']) $('#' + id).disabled = !st.mp4 || st.busy;
   updateTimelineTools();
-  const duration = ranges.reduce((sum, r) => sum + r.end - r.start, 0);
-  $('#selInfo').textContent = st.mp4 ? `${ranges.length} segmento${ranges.length === 1 ? '' : 's'} · ${duration.toFixed(1)}s` : '—';
+  const duration = ranges.reduce((sum, r) => sum + r.end - r.start, 0) + queuedDuration();
+  const segmentCount = ranges.length + st.sequenceClips.length;
+  $('#selInfo').textContent = st.mp4 ? `${segmentCount} segmento${segmentCount === 1 ? '' : 's'} · ${duration.toFixed(1)}s` : '—';
 }
 
 function updateHead() {
-  const editTime = sourceToEdit(video.currentTime || 0);
+  const editTime = currentTimelineTime();
   $('#head').style.left = editPct(editTime);
   $('#time').textContent = fmt(editTime);
+  $('#tracksHead').style.left = editPct(editTime);
   const scrub = $('#scrubHandle');
-  scrub.setAttribute('aria-valuemax', String(editDuration()));
+  scrub.setAttribute('aria-valuemax', String(timelineDuration()));
   scrub.setAttribute('aria-valuenow', String(Math.round(editTime * 10) / 10));
   scrub.setAttribute('aria-valuetext', fmt(editTime));
-  $('#play').textContent = video.paused ? '▶' : '❚❚';
+  $('#play').textContent = (activeSequenceIndex >= 0 ? sequenceVideo.paused : video.paused) ? '▶' : '❚❚';
 }
 
 // Arrastar um ◆ muda o instante dessa posição (sem passar por cima das vizinhas); clique = ir para lá.
@@ -706,6 +1016,7 @@ tl.addEventListener('pointerdown', (e) => {
 });
 
 function seekToTime(time) {
+  if (activeSequenceIndex >= 0) activatePrimaryClip(time, false);
   const previousPart = st.activePart;
   video.currentTime = clamp(time, 0, st.dur);
   selectPartAt(video.currentTime);
@@ -713,7 +1024,16 @@ function seekToTime(time) {
   elementEditor?.update();
   updateHead();
 }
-function seekOnRuler(clientX) { seekToTime(editToSource(tAt(clientX))); }
+function seekTimelineTime(time) {
+  if (time <= editDuration() || !st.sequenceClips.length) { seekToTime(editToSource(clamp(time, 0, editDuration()))); return; }
+  let offset = time - editDuration();
+  for (let i = 0; i < st.sequenceClips.length; i++) {
+    const length = sequenceClipLength(st.sequenceClips[i]);
+    if (offset <= length || i === st.sequenceClips.length - 1) { activateSequenceClip(i, clamp(offset, 0, length), false); return; }
+    offset -= length;
+  }
+}
+function seekOnRuler(clientX) { seekTimelineTime(tAt(clientX)); }
 function startRulerDrag(e) {
   if (!st.mp4 || st.busy || e.button !== 0) return;
   e.preventDefault();
@@ -740,18 +1060,40 @@ $('#scrubHandle').addEventListener('keydown', e => {
   e.preventDefault();
   e.stopImmediatePropagation();
   video.pause();
-  const step = e.shiftKey ? 1 : 1 / (st.mp4.fps || 30), current = sourceToEdit(video.currentTime);
-  const next = e.key === 'Home' ? 0 : e.key === 'End' ? editDuration() : current + (e.key === 'ArrowLeft' ? -step : step);
-  seekToTime(editToSource(clamp(next, 0, editDuration())));
+  const step = e.shiftKey ? 1 : 1 / (st.mp4.fps || 30), current = currentTimelineTime();
+  const next = e.key === 'Home' ? 0 : e.key === 'End' ? timelineDuration() : current + (e.key === 'ArrowLeft' ? -step : step);
+  seekTimelineTime(clamp(next, 0, timelineDuration()));
 });
 
 $('#setIn').addEventListener('click', () => {
   if (!st.mp4 || st.busy) return;
+  if (activeSequenceIndex >= 0) {
+    const clip = st.sequenceClips[activeSequenceIndex], cut = sequenceVideo.currentTime;
+    if (!clip || cut >= (clip.trimEnd ?? clip.dur) - .05) return;
+    clip.trimStart = cut; updateTimeline(); saveSession(); return;
+  }
+  if (audioItem()) {
+    const track = audioItem(), t = sourceToEdit(video.currentTime);
+    if (t < track.start || t >= audioEnd(track) - .05) return;
+    const before = beginVideoEdit(); track.trimStart += t - track.start; track.start = t;
+    renderAudioTracks(); renderTextOpts(); recordVideoEdit(before); return;
+  }
   if (elementEditor?.selected()) { elementEditor.trimSelected('in'); return; }
   const before = beginVideoEdit(); st.start = clamp(video.currentTime, 0, st.end - 0.5); updateTimeline(); recordVideoEdit(before);
 });
 $('#setOut').addEventListener('click', () => {
   if (!st.mp4 || st.busy) return;
+  if (activeSequenceIndex >= 0) {
+    const clip = st.sequenceClips[activeSequenceIndex], cut = sequenceVideo.currentTime;
+    if (!clip || cut <= (clip.trimStart || 0) + .05) return;
+    clip.trimEnd = cut; updateTimeline(); saveSession(); return;
+  }
+  if (audioItem()) {
+    const track = audioItem(), t = sourceToEdit(video.currentTime);
+    if (t <= track.start + .05 || t > audioEnd(track)) return;
+    const before = beginVideoEdit(); track.trimEnd = track.trimStart + t - track.start;
+    renderAudioTracks(); renderTextOpts(); recordVideoEdit(before); return;
+  }
   if (elementEditor?.selected()) { elementEditor.trimSelected('out'); return; }
   const before = beginVideoEdit(); st.end = clamp(video.currentTime, st.start + 0.5, st.dur); updateTimeline(); recordVideoEdit(before);
 });
@@ -834,7 +1176,11 @@ function restoreFullVideo() {
   recordVideoEdit(before);
 }
 function splitSelection() {
-  if (elementEditor?.selected()) {
+  if (activeSequenceIndex >= 0) {
+    if (!splitSequenceClip()) setStatus('Coloca o cursor dentro do vídeo, afastado das pontas, para o dividir.');
+  } else if (audioItem()) {
+    if (!splitAudio()) setStatus('Coloca o cursor dentro da música, afastado das pontas, para a dividir.');
+  } else if (elementEditor?.selected()) {
     if (!elementEditor.splitSelected()) setStatus('Coloca o cursor dentro do elemento, afastado das pontas, para o dividir.');
   } else splitPart();
 }
@@ -874,7 +1220,9 @@ function showRemoveMenu(e) {
   videoMenu.querySelector('button:not([hidden]):not(:disabled)')?.focus();
 }
 $('#removeSegment').addEventListener('click', e => {
-  if (elementEditor?.selected()) elementEditor.remove();
+  if (activeSequenceIndex >= 0) removeSequenceClip();
+  else if (audioItem()) removeAudio();
+  else if (elementEditor?.selected()) elementEditor.remove();
   else showRemoveMenu(e);
 });
 function showVideoMenu(e) {
@@ -889,8 +1237,10 @@ function showVideoMenu(e) {
     const index = [...document.querySelectorAll('#ranges .range')].indexOf(target);
     const range = getRanges()[index];
     if (!range) return;
+    if (activeSequenceIndex >= 0) activatePrimaryClip(range.start, false);
     videoMenuTarget = { kind: 'segment', index };
     st.activePart = index;
+    st.audioSel = null;
     elementEditor?.select(null);
     video.pause();
     video.currentTime = clamp(e.clientX ? editToSource(tAt(e.clientX)) : range.start, range.start, range.end);
@@ -949,6 +1299,10 @@ addEventListener('resize', () => closeVideoMenu());
 $('#play').addEventListener('click', togglePlay);
 function togglePlay() {
   if (!st.mp4) return;
+  if (activeSequenceIndex >= 0) {
+    if (sequenceVideo.paused) sequenceVideo.play().catch(() => {}); else sequenceVideo.pause();
+    return;
+  }
   if (video.paused) {
     const r = selectPartAt(video.currentTime);
     updateTimeline();
@@ -983,7 +1337,9 @@ document.addEventListener('keydown', (e) => {
   if (t.matches?.('input:not([type=range]), select, textarea')) return;
   const k = e.key.toLowerCase();
   if ((e.ctrlKey || e.metaKey) && k === 'b') { e.preventDefault(); e.stopImmediatePropagation(); splitSelection(); return; }
-  if (e.shiftKey && k === 'delete' && !elementEditor?.selected()) { e.preventDefault(); e.stopImmediatePropagation(); rippleDeletePart(); return; }
+  if (e.shiftKey && k === 'delete' && !elementEditor?.selected() && !audioItem() && activeSequenceIndex < 0) { e.preventDefault(); e.stopImmediatePropagation(); rippleDeletePart(); return; }
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && k === 'delete' && activeSequenceIndex >= 0) { e.preventDefault(); e.stopImmediatePropagation(); removeSequenceClip(); return; }
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && k === 'delete' && audioItem()) { e.preventDefault(); e.stopImmediatePropagation(); removeAudio(); return; }
   if (!e.ctrlKey && !e.metaKey && !e.altKey && k === 'delete' && !elementEditor?.selected()) { e.preventDefault(); e.stopImmediatePropagation(); deletePart(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (t.type === 'range' && k.startsWith('arrow')) return;          // as setas mexem no controlo
@@ -1077,7 +1433,7 @@ function renderStreamerOpts(o) {
     <label>Tamanho <input id="mScale" type="range" min="0.2" max="2" step="0.01" value="${s.scale}"> <span class="mono" id="mScaleV">${Math.round(s.scale * 100)}%</span></label>
     <div class="row"><button class="btn small" data-fit="cover">Encher</button><button class="btn small" data-fit="contain">Inteiro</button><button class="btn small" id="mCenter">Centrar</button></div>
     <h2>Biblioteca <span class="sub">(vídeos e imagens guardados)</span></h2>
-    <div class="lib">${st.library.map(libItemHtml).join('')}<label class="add" title="Adicionar vídeos/imagens">+<input id="libAdd" type="file" accept="image/*,video/*" multiple hidden></label></div>` : ''}
+    <div class="lib">${st.library.filter(item => item.type !== 'audio' && !item.sequenceOnly).map(libItemHtml).join('')}<label class="add" title="Adicionar vídeos/imagens">+<input id="libAdd" type="file" accept="image/*,video/*" multiple hidden></label></div>` : ''}
   </div>`;
 
   o.querySelectorAll('[data-b]').forEach((b) => b.addEventListener('click', () => {
@@ -1387,12 +1743,19 @@ function syncMediaTime(event) {
 video.addEventListener('seeked', syncMediaTime);
 video.addEventListener('play', syncMediaTime);
 video.addEventListener('pause', syncMediaTime);
+video.addEventListener('seeked', () => syncAudioPreview(true));
+video.addEventListener('play', () => syncAudioPreview(true));
+video.addEventListener('pause', () => syncAudioPreview(true));
+sequenceVideo.addEventListener('seeked', () => syncAudioPreview(true));
+sequenceVideo.addEventListener('play', () => syncAudioPreview(true));
+sequenceVideo.addEventListener('pause', () => syncAudioPreview(true));
 
 let importingMedia = false;
 async function addToLibrary(files) {
-  if (st.busy || importingMedia) return;
+  if (st.busy || importingMedia) return [];
   importingMedia = true;
   renderTextOpts();
+  const added = [];
   try {
     for (const f of files) {
       try {
@@ -1400,7 +1763,8 @@ async function addToLibrary(files) {
         const m = await importMediaFile(f, getFFmpeg);
         await putMedia(m);
         st.library.push(m);
-        if (!libItem(st.streamer.mediaId)) Object.assign(st.streamer, { mediaId: m.id, scale: 1, ox: 0, oy: 0 });
+        added.push(m);
+        if (m.type !== 'audio' && !libItem(st.streamer.mediaId)) Object.assign(st.streamer, { mediaId: m.id, scale: 1, ox: 0, oy: 0 });
         savePrefs();
         renderOpts();
         renderTextOpts();
@@ -1412,7 +1776,212 @@ async function addToLibrary(files) {
       }
     }
   } finally { importingMedia = false; renderTextOpts(); }
+  return added;
 }
+
+function setAppendSkeleton(visible, text = 'A preparar…') {
+  const row = $('#appendSkeletonRow');
+  row.hidden = !visible;
+  row.setAttribute('aria-busy', String(visible));
+  $('#appendSkeletonText').textContent = text;
+}
+
+async function loadVideoMetadata(file) {
+  const el = document.createElement('video'), url = URL.createObjectURL(file);
+  el.preload = 'metadata'; el.muted = true; el.src = url;
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`«${file.name}» demorou demasiado a abrir.`)), 10000);
+      el.onloadedmetadata = () => { clearTimeout(timer); resolve(); };
+      el.onerror = () => { clearTimeout(timer); reject(new Error(`«${file.name}» não contém vídeo reproduzível.`)); };
+    });
+    return { dur: el.duration, w: el.videoWidth, h: el.videoHeight };
+  } finally { el.removeAttribute('src'); el.load(); URL.revokeObjectURL(url); }
+}
+
+async function queueVideoFiles(files) {
+  if (!st.mp4 || !files.length || st.busy || importingMedia) return;
+  importingMedia = true;
+  setAppendSkeleton(true, files.length === 1 ? 'A ler o vídeo…' : `A ler ${files.length} vídeos…`);
+  $('#addVideo').disabled = $('#addAudio').disabled = true;
+  try {
+    for (const file of files) {
+      setAppendSkeleton(true, `A ler ${file.name}…`);
+      const meta = await loadVideoMetadata(file);
+      if (!Number.isFinite(meta.dur) || meta.dur <= 0) throw new Error(`«${file.name}» não tem uma duração válida.`);
+      const media = { id: 'm' + crypto.randomUUID(), name: file.name.replace(/\.[^.]+$/, ''), sourceName: file.name,
+        type: 'video', blob: file, sourceBlob: file, dur: meta.dur, w: meta.w, h: meta.h, at: Date.now(), sequenceOnly: true };
+      const clip = { id: crypto.randomUUID(), mediaId: media.id, name: media.name, dur: media.dur, trimStart: 0, trimEnd: media.dur };
+      st.library.push(media); st.sequenceClips.push(clip); activeSequenceIndex = st.sequenceClips.length - 1;
+      updateTimeline();
+      // O bloco aparece antes de copiar o Blob para IndexedDB. A persistência
+      // continua em background e não atrasa a interação com a timeline.
+      putMedia(media).then(() => saveSession()).catch(error => console.warn('guardar vídeo da sequência', error));
+    }
+    setStatus(`${files.length} vídeo${files.length === 1 ? '' : 's'} adicionado${files.length === 1 ? '' : 's'} imediatamente · o processamento fica para a exportação.`);
+    activateSequenceClip(st.sequenceClips.length - files.length, 0, false);
+    saveSession();
+  } finally {
+    importingMedia = false; setAppendSkeleton(false); updateTimeline();
+  }
+}
+
+async function materializeVideoFiles(files, clipSpecs = null) {
+  if (!st.mp4 || !files.length || st.busy || importingMedia) return;
+  const oldDuration = st.dur, oldRanges = getRanges().map(range => ({ ...range })), oldState = videoSnapshot();
+  const oldElements = { texts: st.texts, images: st.images, audioTracks: st.audioTracks };
+  const queued = clipSpecs?.map(clip => ({ ...clip })) || null;
+  const queuedMediaIds = new Set(queued?.map(clip => clip.mediaId).filter(Boolean) || []);
+  importingMedia = true; st.busy = true; video.pause();
+  setAppendSkeleton(true, files.length === 1 ? 'A preparar vídeo…' : `A preparar ${files.length} vídeos…`);
+  for (const el of document.querySelectorAll('header, .bottom, .optsWrap, #stage')) el.inert = true;
+  updateTimeline();
+  let ff = null, fastJoin = false;
+  const tempFiles = ['append-main.source', 'append-out.mp4', 'append-list.txt'];
+  try {
+    ff = await getFFmpeg();
+    const media = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i], spec = queued?.[i], displayName = spec?.name || file.name || `vídeo ${i + 1}`;
+      setStatus(`A preparar «${displayName}»…`);
+      setAppendSkeleton(true, `A analisar ${displayName}…`);
+      const item = await inspectVideoFile(file, getFFmpeg);
+      if (item.type !== 'video') throw new Error(`«${displayName}» não contém vídeo.`);
+      const sourceDuration = item.dur;
+      item.trimStart = clamp(spec?.trimStart || 0, 0, Math.max(0, sourceDuration - .05));
+      item.trimEnd = clamp(spec?.trimEnd ?? sourceDuration, item.trimStart + .05, sourceDuration);
+      item.fullClip = item.trimStart < .001 && Math.abs(item.trimEnd - sourceDuration) < .02;
+      item.dur = item.trimEnd - item.trimStart;
+      media.push(item);
+    }
+    setStatus(`A juntar ${media.length} vídeo${media.length === 1 ? '' : 's'} à faixa principal…`);
+    setAppendSkeleton(true, 'A preparar a nova sequência…');
+    await ff.writeFile('append-main.source', new Uint8Array(st.buf.slice(0)));
+    const inputNames = ['append-main.source'];
+    for (let i = 0; i < media.length; i++) {
+      const name = `append-${i}.source`;
+      tempFiles.push(name);
+      await ff.writeFile(name, new Uint8Array(media[i].buffer.slice(0)));
+      inputNames.push(name);
+    }
+
+    // Clips vindos da mesma fonte costumam já ter exatamente o mesmo formato.
+    // Nesse caso o ffmpeg limita-se a remuxar os pacotes: não descodifica nem
+    // recodifica o vídeo principal inteiro, o que torna a junção muito mais rápida.
+    const compatible = st.mp4.codec?.startsWith('avc1') && media.every(item => item.fullClip && item.copyReady && item.codec === st.mp4.codec &&
+      item.w === st.srcW && item.h === st.srcH && Math.abs((item.fps || 0) - st.mp4.fps) < .1 &&
+      item.hasAudio === st.mp4.hasAudio && (!item.hasAudio || item.audioCodec === 'aac'));
+    let output = null;
+    if (compatible) {
+      setAppendSkeleton(true, 'A juntar sem recodificar…');
+      const list = inputNames.map(name => `file '${name}'`).join('\n') + '\n';
+      await ff.writeFile('append-list.txt', new TextEncoder().encode(list));
+      const code = await ff.exec(['-hide_banner', '-f', 'concat', '-safe', '0', '-i', 'append-list.txt', '-map', '0:v:0',
+        ...(st.mp4.hasAudio ? ['-map', '0:a:0'] : []), '-c', 'copy', '-movflags', '+faststart', '-avoid_negative_ts', 'make_zero', '-y', 'append-out.mp4'], 60000);
+      if (code === 0) {
+        const candidate = await ff.readFile('append-out.mp4');
+        const buffer = candidate.buffer.slice(candidate.byteOffset, candidate.byteOffset + candidate.byteLength);
+        const expected = oldDuration + media.reduce((sum, item) => sum + item.dur, 0);
+        try {
+          const parsed = parseMp4(buffer);
+          if (parsed.samples.length && Math.abs(parsed.duration - expected) <= Math.max(.5, expected * .02)) {
+            output = new Uint8Array(buffer); fastJoin = true;
+          }
+        } catch {}
+      }
+    }
+    if (!output) {
+      setAppendSkeleton(true, 'A adaptar formatos e a juntar…');
+      try { await ff.deleteFile('append-out.mp4'); } catch {}
+      const args = ['-hide_banner'];
+      inputNames.forEach(name => args.push('-i', name));
+      const sources = [{ dur: oldDuration, hasAudio: st.mp4.hasAudio, trimStart: 0, trimEnd: oldDuration }, ...media];
+      const fps = st.mp4.fps >= 45 ? 60 : Math.min(30, Math.max(24, Math.round(st.mp4.fps || 30)));
+      const filters = [], concatInputs = [];
+      sources.forEach((source, i) => {
+        const trim = `trim=start=${source.trimStart.toFixed(3)}:end=${source.trimEnd.toFixed(3)}`;
+        filters.push(`[${i}:v:0]${trim},setpts=PTS-STARTPTS,scale=${st.srcW}:${st.srcH}:force_original_aspect_ratio=decrease,pad=${st.srcW}:${st.srcH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p[v${i}]`);
+        if (source.hasAudio) filters.push(`[${i}:a:0]atrim=start=${source.trimStart.toFixed(3)}:end=${source.trimEnd.toFixed(3)},asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`);
+        else filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${source.dur.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`);
+        concatInputs.push(`[v${i}][a${i}]`);
+      });
+      filters.push(`${concatInputs.join('')}concat=n=${sources.length}:v=1:a=1[vout][aout]`);
+      args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20',
+        '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', '-y', 'append-out.mp4');
+      const code = await withTimeout(ff.exec(args), 180000, 'A junção dos vídeos demorou demasiado.');
+      if (code !== 0) throw new Error('Não consegui juntar os vídeos.');
+      output = await ff.readFile('append-out.mp4');
+    }
+    const joined = new Blob([output.buffer.slice(output.byteOffset, output.byteOffset + output.byteLength)], { type: 'video/mp4' });
+
+    // Só aqui (durante a exportação) a sequência virtual passa a ser uma fonte
+    // física. As edições existentes e os limites de cada clip são repostos depois.
+    st.busy = false;
+    for (const el of document.querySelectorAll('header, .bottom, .optsWrap, #stage')) el.inert = false;
+    setAppendSkeleton(true, 'A atualizar a timeline…');
+    await loadClip(joined, st.name, chanKey);
+    const newDuration = st.dur;
+    st.sequenceClips = [];
+    let boundary = oldDuration;
+    const appendedRanges = media.map((item, i) => {
+      const start = boundary;
+      boundary = i === media.length - 1 ? newDuration : Math.min(newDuration, boundary + item.dur);
+      return { start, end: boundary };
+    }).filter(range => range.end - range.start > .05);
+    Object.assign(st, {
+      start: oldState.start,
+      end: newDuration,
+      parts: [...oldRanges, ...appendedRanges],
+      activePart: oldRanges.length,
+      rippleCuts: oldState.rippleCuts,
+      framing: oldState.framing,
+    });
+    st.streamer = oldState.streamer;
+    st.crop.keys = oldState.keys;
+    st.texts = oldElements.texts;
+    st.images = oldElements.images;
+    st.audioTracks = oldElements.audioTracks;
+    st.audioSel = null;
+    if (queuedMediaIds.size) {
+      st.library = st.library.filter(item => !queuedMediaIds.has(item.id));
+      await Promise.all([...queuedMediaIds].map(id => deleteMedia(id).catch(() => {})));
+    }
+    resetSequencePreview();
+    video.currentTime = Math.min(newDuration - .05, oldDuration + .05);
+    normalizeElementTimes();
+    setLayout(oldState.layout);
+    updateTimeline(); renderTextOpts(); elementEditor.reset(); resetEditHistory();
+    await saveSession();
+    setStatus(`${media.length} vídeo${media.length === 1 ? '' : 's'} anexado${media.length === 1 ? '' : 's'}${fastJoin ? ' · junção rápida' : ''} · timeline ${oldDuration.toFixed(1)}s → ${newDuration.toFixed(1)}s`);
+  } finally {
+    importingMedia = false; st.busy = false;
+    setAppendSkeleton(false);
+    for (const el of document.querySelectorAll('header, .bottom, .optsWrap, #stage')) el.inert = false;
+    if (ff) for (const name of tempFiles) { try { await ff.deleteFile(name); } catch {} }
+    updateTimeline(); renderTextOpts();
+  }
+}
+
+async function addAudioTracks(files) {
+  if (!st.mp4 || !files.length) return;
+  const added = await addToLibrary(files), start = clamp(currentTimelineTime(), 0, Math.max(0, timelineDuration() - .05));
+  const before = beginVideoEdit();
+  for (const media of added.filter(item => item.type === 'audio')) {
+    const track = { id: crypto.randomUUID(), mediaId: media.id, start, trimStart: 0, trimEnd: media.dur, volume: .35, fadeIn: 0, fadeOut: 0, muted: false };
+    st.audioTracks.push(track); st.audioSel = track.id;
+  }
+  normalizeAudioTracks(); renderAudioTracks(); renderTextOpts(); recordVideoEdit(before);
+  if (added.length) setStatus(`${added.length} faixa${added.length === 1 ? '' : 's'} de áudio adicionada${added.length === 1 ? '' : 's'}.`);
+}
+
+$('#addVideo').addEventListener('click', () => $('#videoFiles').click());
+$('#addAudio').addEventListener('click', () => $('#audioFiles').click());
+$('#videoFiles').addEventListener('change', async event => {
+  try { await queueVideoFiles([...event.target.files]); }
+  catch (error) { console.error(error); setStatus('Não consegui adicionar o vídeo: ' + error.message); }
+  event.target.value = '';
+});
+$('#audioFiles').addEventListener('change', async event => { await addAudioTracks([...event.target.files]); event.target.value = ''; });
 
 async function replaceLibraryFile(id, file) {
   const previous = libItem(id);
@@ -1437,7 +2006,7 @@ async function replaceLibraryFile(id, file) {
   finally { importingMedia = false; renderTextOpts(); }
 }
 
-(async () => {
+const libraryReady = (async () => {
   try {
     [st.library, st.templates, st.recentClips] = await Promise.all([listMedia(), listTemplates(), listRecentClips()]);
     navigator.storage?.persist?.();
@@ -1570,6 +2139,7 @@ function addText() {
 
 function selectText(id, focus) {
   if (id) elementPanel = '';
+  if (id) { st.audioSel = null; renderAudioTracks(); }
   elementEditor.select(id, true);
   if (focus) { const ta = $('#tText'); ta?.focus(); ta?.select(); }
 }
@@ -1595,7 +2165,9 @@ async function removeLibraryFile(id) {
   const m = libItem(id);
   if (!m) return;
   if (st.images.some(e => e.mediaId === id)) { setStatus('Remove primeiro do vídeo os elementos que usam este ficheiro.'); return; }
-  if (st.templates.some(t => t.images?.some(e => e.mediaId === id) || t.streamer?.mediaId === id)) {
+  if (st.sequenceClips.some(clip => clip.mediaId === id)) { setStatus('Remove primeiro este clip da faixa principal.'); return; }
+  if (st.audioTracks.some(track => track.mediaId === id)) { setStatus('Remove primeiro da timeline as faixas que usam este áudio.'); return; }
+  if (st.templates.some(t => t.images?.some(e => e.mediaId === id) || t.audioTracks?.some(track => track.mediaId === id) || t.streamer?.mediaId === id)) {
     setStatus('Remove primeiro este ficheiro dos templates que o usam.'); return;
   }
   if (!confirm(`Apagar «${m.name}» da biblioteca?`)) return;
@@ -1613,7 +2185,7 @@ async function removeLibraryFile(id) {
 }
 
 function imagePickerHtml() {
-  const files = [...st.library].sort((a, b) => b.at - a.at);
+  const files = st.library.filter(item => item.type !== 'audio' && !item.sequenceOnly).sort((a, b) => b.at - a.at);
   return `<div class="hrow"><h3>Últimos ficheiros</h3><button id="uploadImage" class="btn small"${importingMedia ? ' disabled' : ''}>${importingMedia ? 'A carregar…' : 'Carregar ficheiro'}</button></div>
     <input id="imageFiles" type="file" accept="image/*,video/*,.gif,.mov,.mp4,.m4v,.mkv,.webm" multiple hidden>
     ${files.length ? `<div class="recentImages">${files.map((m) => `<div class="recentFile"><button class="recentImage" data-image-id="${esc(m.id)}" title="Adicionar ${esc(m.name)}"><img src="${esc(m.thumb)}" alt="" loading="lazy"><span>${isGif(m) ? 'GIF · ' : m.type === 'video' ? '▶ · ' : ''}${esc(m.name)}</span></button><button class="recentFileDelete" data-delete-media="${esc(m.id)}" title="Apagar ${esc(m.name)}" aria-label="Apagar ${esc(m.name)} da biblioteca">×</button></div>`).join('')}</div>` : ''}`;
@@ -1637,9 +2209,38 @@ function bindImagePicker(o) {
   o.querySelectorAll('[data-delete-media]').forEach(b => b.addEventListener('click', () => removeLibraryFile(b.dataset.deleteMedia)));
 }
 
+function renderAudioOptions(o, track) {
+  const media = libItem(track.mediaId), length = audioLength(track), fadeMax = Math.max(0, length / 2);
+  o.innerHTML = `<div class="opt audioOptions">
+    <div class="hrow"><h2>Música / áudio</h2><button id="closeAudioOptions" class="btn small" aria-label="Fechar ajustes de áudio">✕</button></div>
+    <strong>${esc(media?.name || 'Áudio')}</strong>
+    <span class="muted small">${fmt(track.start)} – ${fmt(audioEnd(track))} · ${fmt(length)}</span>
+    <label>Volume <input id="audioVolume" type="range" min="0" max="200" step="1" value="${Math.round(track.volume * 100)}"><span id="audioVolumeValue" class="mono audioValue">${Math.round(track.volume * 100)}%</span></label>
+    <label>Entrada suave <input id="audioFadeIn" type="range" min="0" max="${fadeMax}" step="0.1" value="${track.fadeIn}"><span id="audioFadeInValue" class="mono audioValue">${track.fadeIn.toFixed(1)}s</span></label>
+    <label>Saída suave <input id="audioFadeOut" type="range" min="0" max="${fadeMax}" step="0.1" value="${track.fadeOut}"><span id="audioFadeOutValue" class="mono audioValue">${track.fadeOut.toFixed(1)}s</span></label>
+    <div class="row"><button id="audioMutePanel" class="btn small">${track.muted ? 'Ativar som' : 'Silenciar'}</button><button id="audioDeletePanel" class="btn small danger">Apagar faixa</button></div>
+  </div>`;
+  const bindRange = (id, key, format, scale = 1) => {
+    const input = o.querySelector('#' + id), value = o.querySelector('#' + id + 'Value');
+    let before = null;
+    input.addEventListener('input', () => {
+      before ??= beginVideoEdit(); track[key] = +input.value * scale; value.textContent = format(track[key]); syncAudioPreview(true); saveSession();
+    });
+    input.addEventListener('change', () => { if (before) recordVideoEdit(before); before = null; });
+  };
+  bindRange('audioVolume', 'volume', value => `${Math.round(value * 100)}%`, .01);
+  bindRange('audioFadeIn', 'fadeIn', value => `${value.toFixed(1)}s`);
+  bindRange('audioFadeOut', 'fadeOut', value => `${value.toFixed(1)}s`);
+  o.querySelector('#audioMutePanel').addEventListener('click', () => { const before = beginVideoEdit(); track.muted = !track.muted; syncAudioPreview(true); renderAudioTracks(); renderTextOpts(); recordVideoEdit(before); });
+  o.querySelector('#audioDeletePanel').addEventListener('click', () => removeAudio(track.id));
+  o.querySelector('#closeAudioOptions').addEventListener('click', () => selectAudio(null));
+}
+
 function renderTextOpts() {
   elementEditor?.renderTracks();
-  const o = $('#textOpts'), t = elementPanel ? null : selText();
+  const o = $('#textOpts'), audio = audioItem();
+  if (audio) { renderAudioOptions(o, audio); return; }
+  const t = elementPanel ? null : selText();
   const selected = elementPanel ? null : elementEditor?.selected();
   const presetButtons = t ? TEXT_PRESETS.map(preset => {
     const active = Object.entries(preset.values).filter(([key]) => key !== 'y').every(([key, value]) => t[key] === value);
@@ -1797,6 +2398,7 @@ function snapshot() {
     crop: st.crop.keys.length ? cropAt(video.currentTime) : loadJSON('sc.crop', null),
     texts: st.texts.map(({ id, _box, ...rest }) => rest),
     images: cleanElements(st.images),
+    audioTracks: st.audioTracks.map(({ id, ...track }) => track),
   };
 }
 
@@ -1824,6 +2426,8 @@ function applyTemplateSnap(t) {
   if (t.crop) saveJSON('sc.crop', t.crop);
   st.texts = (t.texts || []).map((x) => ({ ...x, id: 'T' + ++textSeq }));
   st.images = (t.images || []).map(x => ({ ...x, id: crypto.randomUUID() }));
+  st.audioTracks = (t.audioTracks || []).map(track => ({ ...track, id: crypto.randomUUID() }));
+  st.audioSel = null;
   pendingTemplateDuration = null;
   if (Number.isFinite(t.duration) && t.duration > 0) {
     if (st.dur > 0) offsetElementTimes(t.duration, st.dur);
@@ -1836,6 +2440,7 @@ function applyTemplateSnap(t) {
   saveTexts();
   setLayout(t.layout || 'streamer');
   syncMediaTime();
+  syncAudioPreview(true);
   elementEditor?.reset();
   resetEditHistory();
 }
@@ -1979,6 +2584,8 @@ function saveSession() {
     framing: st.framing,
     texts: st.texts.map(({ id, _box, ...rest }) => rest),
     images: cleanElements(st.images),
+    audioTracks: st.audioTracks.map(({ id, ...track }) => track),
+    sequenceClips: structuredClone(st.sequenceClips),
     at: Date.now(),
   };
   saveJSON('sc.session', session);
@@ -2001,6 +2608,11 @@ async function restoreSession() {
   st.crop.keys = (ss.keys || []).filter((k) => k.t <= st.dur);
   if (ss.texts) { st.texts = ss.texts.map((x) => ({ ...x, id: 'T' + ++textSeq })); st.textSel = null; }
   st.images = (ss.images || []).map(x => ({ ...x, id: crypto.randomUUID() }));
+  st.audioTracks = (ss.audioTracks || []).map(track => ({ ...track, id: crypto.randomUUID() }));
+  st.audioSel = null;
+  st.sequenceClips = (ss.sequenceClips || []).filter(clip => clip?.mediaId && libItem(clip.mediaId));
+  activeSequenceIndex = -1;
+  normalizeAudioTracks();
   return true;
 }
 
@@ -2010,6 +2622,7 @@ function normalizeElementTimes() {
     e.in = clamp(e.in ?? 0, 0, Math.max(0, st.dur - .1));
     if (e.out != null) e.out = clamp(e.out, Math.min(st.dur, e.in + .1), st.dur);
   }
+  normalizeAudioTracks();
 }
 
 function offsetElementTimes(fromDuration, toDuration) {
@@ -2027,6 +2640,7 @@ async function loadClip(blob, name, channel, fromStore = false, initialRange = n
   const loadId = ++clipLoadId;
   let url = null;
   try {
+    resetSequencePreview();
     setStatus('A abrir o clip…');
     const buf = await blob.arrayBuffer();
     const mp4 = parseMp4(buf);
@@ -2057,6 +2671,8 @@ async function loadClip(blob, name, channel, fromStore = false, initialRange = n
     st.parts = null;
     st.activePart = 0;
     st.rippleCuts = [];
+    st.sequenceClips = [];
+    activeSequenceIndex = -1;
     st.crop.keys = [];
     st.framing = normalizeFraming(st.templates.find(t => t.id === tplCur)?.framing);
     chanKey = channel || '_last';
@@ -2070,6 +2686,9 @@ async function loadClip(blob, name, channel, fromStore = false, initialRange = n
       if (rangeEnd - rangeStart > 0.05) { st.start = rangeStart; st.end = rangeEnd; }
     }
     sessionKey = `${st.name}|${blob.size}${branchId ? `|branch:${branchId}` : ''}`;
+    // Os clips virtuais da sessão referenciam a biblioteca persistida. Esperar por
+    // ela evita perder a sequência quando o editor é recarregado muito depressa.
+    await libraryReady;
     const resumed = await restoreSession();
     if (pendingTemplateDuration != null) {
       if (!resumed) offsetElementTimes(pendingTemplateDuration, st.dur);
@@ -2558,7 +3177,7 @@ function canCopyExport() {
   if (!st.mp4?.codec?.startsWith('avc1')) return false;   // só faz sentido para H.264
   const f = st.framing.original;
   if (Math.abs(f.scale - 1) > 1e-3 || Math.abs(f.ox) > 1e-3 || Math.abs(f.oy) > 1e-3) return false;
-  if (st.texts.length || st.images.length) return false;
+  if (st.texts.length || st.images.length || st.audioTracks.length) return false;
   return getRanges().length === 1;
 }
 
@@ -2595,6 +3214,25 @@ async function copyExportClip(onProgress) {
 async function exportClip({ tiktok = false } = {}) {
   if (st.busy || !st.mp4) return;
   if (importingMedia) { setStatus('Espera que os ficheiros acabem de carregar antes de exportar.'); return; }
+  if (st.sequenceClips.length) {
+    const clips = st.sequenceClips.map(clip => ({ ...clip }));
+    const files = clips.map(clip => {
+      const media = libItem(clip.mediaId);
+      return media?.sourceBlob || media?.blob || null;
+    });
+    if (files.some(file => !file)) {
+      setStatus('Falta um vídeo da sequência. Remove-o e volta a adicioná-lo antes de exportar.');
+      return;
+    }
+    try {
+      setStatus('A preparar os vídeos adicionais para exportar…');
+      await materializeVideoFiles(files, clips);
+    } catch (error) {
+      console.error(error);
+      setStatus('Não consegui preparar os vídeos adicionais: ' + (error.message || error));
+      return;
+    }
+  }
   st.busy = true;
   for (const el of document.querySelectorAll('header, .bottom, .optsWrap, #stage')) el.inert = true;
   video.pause();
@@ -2634,21 +3272,48 @@ async function exportClip({ tiktok = false } = {}) {
     const log = [];
     const onLog = ({ message }) => { log.push(message); if (log.length > 40) log.shift(); };
     ff.on('log', onLog);
+    const tempAudioFiles = [];
     try {
       await ff.writeFile('v.h264', new Uint8Array(await v.h264.arrayBuffer()));
       const args = ['-hide_banner', '-framerate', String(v.fps), '-i', 'v.h264'];
+      const filters = [], mixLabels = [];
+      let inputIndex = 1;
       if (st.mp4.hasAudio) {
         await ff.writeFile('src.mp4', new Uint8Array(st.buf.slice(0)));   // cópia: o ffmpeg transfere o buffer
-        const filters = [], labels = [];
+        args.push('-i', 'src.mp4');
+        const labels = [];
         getRanges().forEach((r, i) => {
           filters.push(`[1:a:0]atrim=start=${r.start.toFixed(3)}:end=${r.end.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`);
           labels.push(`[a${i}]`);
         });
-        filters.push(`${labels.join('')}concat=n=${labels.length}:v=0:a=1[aout]`);
-        args.push('-i', 'src.mp4', '-filter_complex', filters.join(';'), '-map', '0:v:0', '-map', '[aout]', '-c:a', 'aac', '-b:a', '160k');
-      } else {
-        args.push('-map', '0:v:0');
+        filters.push(`${labels.join('')}concat=n=${labels.length}:v=0:a=1[amain]`);
+        mixLabels.push('[amain]');
+        inputIndex++;
       }
+      for (const [i, track] of st.audioTracks.filter(item => !item.muted && item.volume > 0).entries()) {
+        const media = libItem(track.mediaId);
+        if (!media?.blob) throw new Error('Falta um ficheiro de áudio usado na timeline.');
+        const fileName = `music${i}.src`;
+        await ff.writeFile(fileName, new Uint8Array(await (media.sourceBlob || media.blob).arrayBuffer()));
+        tempAudioFiles.push(fileName);
+        args.push('-i', fileName);
+        const length = Math.max(.05, Math.min(audioLength(track), editDuration() - track.start));
+        const chain = [`[${inputIndex}:a:0]atrim=start=${track.trimStart.toFixed(3)}:end=${(track.trimStart + length).toFixed(3)}`, 'asetpts=PTS-STARTPTS', `volume=${track.volume.toFixed(3)}`];
+        if (track.fadeIn > 0) chain.push(`afade=t=in:st=0:d=${Math.min(track.fadeIn, length / 2).toFixed(3)}`);
+        if (track.fadeOut > 0) {
+          const fade = Math.min(track.fadeOut, length / 2);
+          chain.push(`afade=t=out:st=${Math.max(0, length - fade).toFixed(3)}:d=${fade.toFixed(3)}`);
+        }
+        if (track.start > 0) chain.push(`adelay=delays=${Math.round(track.start * 1000)}:all=1`);
+        filters.push(`${chain.join(',')}[music${i}]`);
+        mixLabels.push(`[music${i}]`);
+        inputIndex++;
+      }
+      if (mixLabels.length > 1) filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0:dropout_transition=0,alimiter=limit=.95,atrim=duration=${(v.frames / v.fps).toFixed(3)}[aout]`);
+      else if (mixLabels.length === 1) filters.push(`${mixLabels[0]}atrim=duration=${(v.frames / v.fps).toFixed(3)}[aout]`);
+      if (filters.length) args.push('-filter_complex', filters.join(';'));
+      args.push('-map', '0:v:0');
+      if (mixLabels.length) args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '160k');
       args.push('-c:v', 'copy', '-movflags', '+faststart', '-y', 'out.mp4');
       checkAbort();
       const code = await withTimeout(ff.exec(args), 90000, 'O ffmpeg encravou a juntar o som.').catch((e) => {
@@ -2682,7 +3347,7 @@ async function exportClip({ tiktok = false } = {}) {
       }
     } finally {
       ff.off('log', onLog);
-      for (const f of ['v.h264', 'src.mp4', 'out.mp4']) { try { await ff.deleteFile(f); } catch {} }
+      for (const f of ['v.h264', 'src.mp4', 'out.mp4', ...tempAudioFiles]) { try { await ff.deleteFile(f); } catch {} }
     }
   } catch (e) {
     console.error(e);
@@ -2724,7 +3389,7 @@ async function save(blob, name) {
 
 // Para testes fora da extensão.
 elementEditor = createElementEditor({ st, video, preview,
-  timelineDuration: editDuration,
+  timelineDuration,
   toTimelineTime: sourceToEdit,
   fromTimelineTime: editToSource,
   onCommit: () => recordEdit({ kind: 'element' }),
@@ -2732,7 +3397,10 @@ elementEditor = createElementEditor({ st, video, preview,
   canUndo: () => editUndo.length > 0,
   canRedo: () => editRedo.length > 0,
   renderPanel: () => { elementPanel = ''; renderTextOpts(); },
-  onSelection: updateTimelineTools,
+  onSelection: () => {
+    if (elementEditor?.selected() && st.audioSel) { st.audioSel = null; renderAudioTracks(); }
+    updateTimelineTools();
+  },
   save: () => {
     const t = selText();
     if (t) saveJSON('sc.textStyle', Object.fromEntries(TEXT_STYLE_KEYS.map(k => [k, t[k]])));
@@ -2741,7 +3409,7 @@ elementEditor = createElementEditor({ st, video, preview,
   },
   addText, mediaItem: libItem, fmt,
 });
-if (DEV) globalThis.__editor = { st, exportClip, setLayout, setCropKey, addToLibrary, libItem, previewMedia, addText, selectText, snapshot, applyTemplateSnap, elementEditor, renderFrame, encodeVideo, saveSession, updateTimeline, sourceToEdit, editToSource, editDuration, askTikTok, finishTikTok };
+if (DEV) globalThis.__editor = { st, exportClip, setLayout, setCropKey, addToLibrary, queueVideoFiles, materializeVideoFiles, addAudioTracks, libItem, previewMedia, addText, selectText, selectAudio, snapshot, applyTemplateSnap, elementEditor, renderFrame, encodeVideo, saveSession, updateTimeline, sourceToEdit, editToSource, editDuration, timelineDuration, askTikTok, finishTikTok };
 
 // Abre no último formato usado (a primeira vez: Streamer).
 let lastLayout = null;

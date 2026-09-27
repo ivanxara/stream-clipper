@@ -32,6 +32,36 @@ export function importMediaFile(file, getFFmpeg) {
   return task;
 }
 
+// Inspeção leve para anexar à faixa principal: não cria miniatura nem converte
+// antecipadamente. O mesmo ArrayBuffer segue depois para a concatenação, evitando
+// ler ficheiros grandes várias vezes.
+export async function inspectVideoFile(file, getFFmpeg) {
+  const ff = await getFFmpeg(), prefix = newId(), inName = prefix + '.inspect', probeName = prefix + '.json';
+  const buffer = await file.arrayBuffer();
+  try {
+    await ff.writeFile(inName, new Uint8Array(buffer.slice(0)));
+    await ff.ffprobe(['-v', 'error', '-show_streams', '-show_format', '-of', 'json', '-o', probeName, inName], 30000);
+    const info = JSON.parse(new TextDecoder().decode(await ff.readFile(probeName)));
+    const stream = info.streams?.find(item => item.codec_type === 'video' && !item.disposition?.attached_pic);
+    if (!stream?.width || !stream?.height) throw new Error(`«${file.name}» não contém vídeo.`);
+    const audio = info.streams?.find(item => item.codec_type === 'audio');
+    let mp4 = null;
+    try { mp4 = parseMp4(buffer); if (!mp4.samples.length) mp4 = null; } catch {}
+    const ratio = String(stream.avg_frame_rate || stream.r_frame_rate || '').split('/').map(Number);
+    const probedFps = ratio.length === 2 && ratio[1] ? ratio[0] / ratio[1] : 0;
+    const duration = +(mp4?.duration || stream.duration || info.format?.duration || 0);
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error(`«${file.name}» não tem uma duração válida.`);
+    const rotation = +(stream.side_data_list?.find(item => item.rotation != null)?.rotation || stream.tags?.rotate || 0);
+    const swap = Math.abs(rotation) % 180 === 90;
+    return { type: 'video', name: file.name.replace(/\.[^.]+$/, ''), sourceBlob: file, buffer, dur: duration,
+      w: swap ? stream.height : stream.width, h: swap ? stream.width : stream.height,
+      hasAudio: !!audio, audioCodec: audio?.codec_name || null, codec: mp4?.codec || null,
+      fps: mp4?.fps || probedFps, copyReady: !!mp4 };
+  } finally {
+    for (const name of [inName, probeName]) { try { await ff.deleteFile(name); } catch {} }
+  }
+}
+
 async function importFile(file, getFFmpeg) {
   const base = { id: newId(), name: file.name.replace(/\.[^.]+$/, ''), at: Date.now(),
     sourceBlob: file, sourceName: file.name, importVersion: 2 };
@@ -55,10 +85,15 @@ async function importFile(file, getFFmpeg) {
   const inName = prefix + '.source', probeName = prefix + '.json', outName = prefix + '.mp4';
   try {
     await ff.writeFile(inName, new Uint8Array(await file.arrayBuffer()));
-    await ff.ffprobe(['-v', 'error', '-show_streams', '-show_pixel_formats', '-of', 'json', '-o', probeName, inName], 30000);
+    await ff.ffprobe(['-v', 'error', '-show_streams', '-show_format', '-show_pixel_formats', '-of', 'json', '-o', probeName, inName], 30000);
     const info = JSON.parse(new TextDecoder().decode(await ff.readFile(probeName)));
     const stream = info.streams?.find(s => s.codec_type === 'video' && !s.disposition?.attached_pic);
-    if (!stream || !stream.width || !stream.height) throw new Error('O ficheiro não contém um vídeo legível.');
+    const audioStream = info.streams?.find(s => s.codec_type === 'audio');
+    if (!stream || !stream.width || !stream.height) {
+      const duration = +(audioStream?.duration || info.format?.duration || 0);
+      if (!audioStream || !Number.isFinite(duration) || duration <= 0) throw new Error('O ficheiro não contém vídeo ou áudio legível.');
+      return { ...base, type: 'audio', blob: file, dur: duration, hasAudio: true };
+    }
     const alpha = !!info.pixel_formats?.find(p => p.name === stream.pix_fmt)?.flags?.alpha ||
       Object.entries(stream.tags || {}).some(([k, v]) => k.toLowerCase() === 'alpha_mode' && +v === 1);
     // Os descodificadores nativos VP8/VP9 ignoram a máscara WebM; libvpx lê-a.
@@ -93,7 +128,8 @@ async function importFile(file, getFFmpeg) {
     if (!mp4 || !Number.isFinite(mp4.duration) || mp4.duration <= 0) throw new Error(`«${file.name}»: codec não suportado ou vídeo inválido.`);
     const rotation = +(stream.side_data_list?.find(s => s.rotation != null)?.rotation || stream.tags?.rotate || 0);
     const swap = Math.abs(rotation) % 180 === 90;
-    const rec = { ...base, type: 'video', blob, dur: mp4.duration,
+    const rec = { ...base, type: 'video', blob, dur: mp4.duration, hasAudio: !!audioStream,
+      audioCodec: audioStream?.codec_name || null, codec: mp4.codec, fps: mp4.fps, copyReady: blob === file,
       w: alpha ? (swap ? stream.height : stream.width) : mp4.width,
       h: alpha ? (swap ? stream.width : stream.height) : mp4.height,
       alphaLayout: alpha ? 'side-by-side' : null };

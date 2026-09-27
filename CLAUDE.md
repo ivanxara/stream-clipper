@@ -56,6 +56,15 @@ UI, comentários e respostas em PT-PT. Guia do utilizador: `LEIA-ME.txt` (manter
   exportação. Imagens livres são guardadas na sessão e nos templates; os bitmaps são preparados
   antes de codificar. `tests/editor-elements.cjs <clip.mp4>` testa interações reais no Chrome e
   codificação H.264 (Playwright instalado, ou caminho em `PLAYWRIGHT_MODULE`).
+- O editor tem atalhos visíveis «+ Vídeo» e «+ Música». «+ Vídeo» cria imediatamente clips virtuais
+  em `st.sequenceClips`, usando apenas os metadados nativos para a timeline e a pré-visualização
+  (overlays continuam em Elementos). Só ao exportar `materializeVideoFiles` consolida a sequência:
+  se codec/resolução/FPS/áudio forem compatíveis usa concat demuxer + `-c copy`; caso contrário
+  recodifica, respeitando `trimStart/trimEnd` e splits. Durante leitura/consolidação mostra
+  `#appendSkeletonRow` animado na timeline;
+  música usa `st.audioTracks` (`start`, `trimStart/trimEnd`, `volume`, fades, mute), tem faixa compacta,
+  pré-escuta sincronizada e é misturada com o som original pelo ffmpeg no fim da exportação. Áudio,
+  tal como os elementos, fica na sessão e nos templates. `media.js` também importa ficheiros só de áudio.
 
 ## Armadilhas já descobertas
 - WebCodecs: o `VideoDecoder.flush()` por hardware NÃO acaba se os frames de saída não forem

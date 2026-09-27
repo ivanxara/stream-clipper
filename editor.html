@@ -26,6 +26,7 @@
   <main>
     <div id="stage" class="stage">
       <video id="src" playsinline preload="auto"></video>
+      <video id="sequenceSrc" playsinline preload="metadata" hidden></video>
       <div id="overlay"></div>
       <div id="drop" class="drop">Arrasta um clip para aqui ou usa «Abrir clip…»</div>
     </div>
@@ -64,14 +65,20 @@
         <span class="muted">·</span>
         <span id="selInfo" class="mono muted">—</span>
         <div class="historyTools" role="group" aria-label="Histórico de edições">
-          <button id="elementUndo" class="btn small" title="Desfazer última edição (Ctrl+Z)" aria-label="Desfazer última edição" disabled>↶</button>
-          <button id="elementRedo" class="btn small" title="Refazer última edição (Ctrl+Shift+Z)" aria-label="Refazer última edição" disabled>↷</button>
+          <button id="elementUndo" class="btn small" title="Desfazer última edição (Ctrl+Z)" aria-label="Desfazer última edição" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7-5 5 5 5"/><path d="M4 12h9a7 7 0 0 1 7 7"/></svg></button>
+          <button id="elementRedo" class="btn small" title="Refazer última edição (Ctrl+Shift+Z)" aria-label="Refazer última edição" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 5 5-5 5"/><path d="M20 12h-9a7 7 0 0 0-7 7"/></svg></button>
         </div>
         <div class="editTools" role="group" aria-label="Ferramentas de corte">
-          <button id="setIn" class="btn toolIcon" aria-label="Marcar início (I)" title="Marcar início (I)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3v18M19 7l-6 5 6 5M13 12H5"/></svg><span>In&#237;cio</span></button>
-          <button id="setOut" class="btn toolIcon" aria-label="Marcar fim (O)" title="Marcar fim (O)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 6 5-6 5m0-5h14M19 3v18"/></svg><span>Fim</span></button>
+          <button id="setIn" class="btn toolIcon" aria-label="Marcar início (I)" title="Marcar início (I)"><svg class="trimMarkIcon" viewBox="0 0 20 20" aria-hidden="true"><path class="trimBoundary" d="M4.5 3v14"/><path d="m14.5 5.5-4.5 4.5 4.5 4.5M10 10H4.5"/></svg><span>In&#237;cio</span></button>
+          <button id="setOut" class="btn toolIcon" aria-label="Marcar fim (O)" title="Marcar fim (O)"><svg class="trimMarkIcon" viewBox="0 0 20 20" aria-hidden="true"><path class="trimBoundary" d="M15.5 3v14"/><path d="m5.5 5.5 4.5 4.5-4.5 4.5M10 10h5.5"/></svg><span>Fim</span></button>
           <button id="splitClip" class="btn toolIcon" aria-label="Dividir segmento (Ctrl+B)" title="Dividir segmento (Ctrl+B)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="m8 6.5 12 12M8 17.5l5.5-5.5M17 7l3-3M13.5 12H21"/></svg><span>Dividir</span></button>
           <button id="removeSegment" class="btn toolIcon danger" aria-label="Remover segmento" title="Remover segmento" aria-haspopup="menu" aria-expanded="false" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/></svg><span>Remover</span><svg class="menuChevron" viewBox="0 0 12 12" aria-hidden="true"><path d="m2 4 4 4 4-4"/></svg></button>
+        </div>
+        <div class="mediaTools" role="group" aria-label="Adicionar media">
+          <button id="addVideo" class="btn toolIcon" title="Anexar vídeo à faixa principal" disabled><span aria-hidden="true">＋▣</span><span>Vídeo</span></button>
+          <button id="addAudio" class="btn toolIcon" title="Adicionar música ou áudio" disabled><span aria-hidden="true">＋♪</span><span>Música</span></button>
+          <input id="videoFiles" type="file" accept="video/*,.mov,.mp4,.m4v,.mkv,.webm" multiple hidden>
+          <input id="audioFiles" type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac,.opus" multiple hidden>
         </div>
         <span class="spacer"></span>
       </div>
@@ -89,6 +96,11 @@
             <div id="head" class="playhead"></div>
           </div>
         </div>
+        <div id="appendSkeletonRow" class="appendSkeletonRow" role="status" aria-live="polite" hidden>
+          <span class="trackLabel">＋ Vídeo</span>
+          <div class="appendSkeletonLane"><div class="appendSkeletonBlock"><span id="appendSkeletonText">A preparar…</span></div></div>
+        </div>
+        <div id="audioTracks"></div>
         <div class="tracksHeadWrap"><div id="tracksHead"><button id="scrubHandle" class="scrubHandle" type="button" role="slider" aria-label="Posição no vídeo" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0:00.0" title="Arrasta para percorrer o vídeo"></button></div></div>
       </div>
     </div>
@@ -147,6 +159,7 @@
       <div class="hrow"><b id="helpTitle">Ajuda e atalhos</b><button class="btn small" aria-label="Fechar ajuda" autofocus>✕</button></div>
       <p>Seleciona um elemento no visor ou na timeline. Arrasta para mover, usa os cantos para redimensionar e a pega ↻ para rodar.</p>
       <p>Em «Adicionar elemento» → «Ficheiro», carrega imagens, GIFs ou vídeos MOV/MP4 e clica numa miniatura para adicionar ao visor. GIFs e vídeos repetem sem som durante o intervalo do elemento; a animação também fica na exportação.</p>
+      <p>Usa «+ Vídeo» para anexar imediatamente um ou mais clips ao fim da faixa principal e aumentar a timeline. Podes pré-visualizar, cortar e dividir logo; a adaptação dos formatos só acontece ao exportar. Para sobrepor um vídeo, usa «Adicionar elemento» → «Ficheiro». «+ Música» cria uma faixa de áudio; arrasta-a para posicionar, usa as extremidades para cortar e ajusta volume e fades no painel lateral.</p>
       <p>Na timeline, arrasta o marcador amarelo ou a régua de tempo para percorrer o vídeo. Com um elemento selecionado, Início/Fim e Dividir atuam nesse elemento; sem seleção, atuam no vídeo. No botão direito de um segmento, «Duplicar segmento» insere uma cópia imediatamente a seguir na exportação; «Abrir segmento noutra aba» cria uma edição independente só desse intervalo. Em «Remover», escolhe se o espaço fica vazio ou se o conteúdo seguinte avança para o ocupar. O marcador ↶ repõe qualquer corte; no menu do vídeo podes repor o vídeo completo.</p>
       <p>No Streamer, arrasta a divisão verde para ajustar a altura da câmara. Clica na zona de baixo para mover o conteúdo e ajustar o zoom pelos cantos da moldura azul.</p>
       <p>No Desfocado e Original, usa «Zoom do vídeo», os botões − / + ou a roda do rato sobre o vídeo para aproximar até 400%. Arrasta para enquadrar e usa «Repor enquadramento» para voltar ao início. O zoom fica no vídeo exportado.</p>

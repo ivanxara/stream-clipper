@@ -33,6 +33,7 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 
 .stage { grid-area: stage; position: relative; min-width: 0; min-height: 0; background: #000; border-radius: 10px; overflow: hidden; }
 .stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.stage video[hidden] { display: none; }
 #overlay { position: absolute; inset: 0; pointer-events: none; }
 .drop { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 12px; color: var(--muted); border: 2px dashed var(--line); border-radius: 10px; }
 .stage.loaded .drop { display: none; }
@@ -76,11 +77,16 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .bottom { grid-area: bottom; min-width: 0; }
 .transport { display: flex; align-items: center; gap: 8px; }
 .historyTools { display: flex; align-items: center; gap: 3px; margin-left: 4px; padding-left: 8px; border-left: 1px solid var(--line); }
-.historyTools .btn { min-width: 30px; height: 30px; padding: 0 7px; font-size: 17px; line-height: 1; }
+.historyTools .btn { display: inline-grid; place-items: center; width: 30px; min-width: 30px; height: 30px; padding: 0; line-height: 1; }
+.historyTools svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 .editTools { display: flex; align-items: center; gap: 3px; margin-left: 4px; padding-left: 8px; border-left: 1px solid var(--line); }
+.mediaTools { display: flex; align-items: center; gap: 3px; margin-left: 4px; padding-left: 8px; border-left: 1px solid var(--line); }
 .toolIcon { display: inline-grid; place-items: center; width: 32px; height: 30px; padding: 0; border-radius: 5px; }
 .toolIcon svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.toolIcon .trimMarkIcon { width: 18px; height: 18px; stroke-width: 1.7; }
+.toolIcon .trimMarkIcon .trimBoundary { stroke-width: 2.2; }
 .toolIcon .menuChevron { width: 12px; height: 12px; margin-left: -3px; }
+.toolIcon .menuChevron[hidden] { display: none; }
 .toolIcon.danger { color: #fca5a5; }
 .spacer { flex: 1; }
 .timeline { position: relative; height: 34px; margin: 2px 8px 0; cursor: pointer; touch-action: none; }
@@ -327,9 +333,9 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .elementGuide.horizontal { left: 0; right: 0; height: 1px; }
 #elementAngle { width: 75px; padding: 5px; border: 1px solid var(--line); border-radius: 5px; background: #22222a; color: var(--text); }
 .bottom { background: var(--panel); padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
-.tracksWrap { position: relative; max-height: 185px; min-height: 0; overflow-y: auto; margin-top: 7px; padding-bottom: 2px; }
-.elementRuler { display: flex; justify-content: space-between; margin-left: 102px; height: 20px; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.elementTrack { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 8px; margin-bottom: 3px; height: 29px; }
+.tracksWrap { position: relative; max-height: 172px; min-height: 0; overflow-y: auto; margin-top: 7px; padding-bottom: 2px; }
+.elementRuler { display: flex; justify-content: space-between; margin-left: 102px; height: 17px; font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.elementTrack { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 8px; margin-bottom: 2px; height: 23px; }
 .trackLabel { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: transparent; color: #b5b4c6; border: 0; text-align: left; padding: 5px 3px; font: inherit; font-size: 11px; cursor: pointer; }
 .trackLane { position: relative; background: #101015; border-radius: 4px; cursor: crosshair; }
 .elementBlock { position: absolute; height: 100%; border-radius: 4px; border: 1px solid #8656b3; background: #492d68; color: #eee5ff; min-width: 5px; overflow: visible; font-size: 11px; display: flex; align-items: center; }
@@ -339,10 +345,10 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .elementBlock.imageBlock.on { border-color: #b5f5ff; }
 .blockName { flex: 1; min-width: 0; padding: 0 13px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; pointer-events: none; }
 .timeGrip { position: absolute; left: -17px; top: 0; bottom: 0; width: 20px; cursor: ew-resize; background: transparent; z-index: 2; }
-.timeGrip::after { content: ''; position: absolute; left: 15px; top: 5px; bottom: 5px; width: 3px; border-radius: 2px; background: #ffffffc0; }
+.timeGrip::after { content: ''; position: absolute; left: 15px; top: 4px; bottom: 4px; width: 3px; border-radius: 2px; background: #ffffffc0; }
 .timeGrip.end { left: auto; right: -17px; }
 .timeGrip.end::after { left: 2px; }
-.tracksHeadWrap { position: absolute; left: 102px; right: 0; top: 20px; bottom: 0; pointer-events: none; }
+.tracksHeadWrap { position: absolute; left: 102px; right: 0; top: 17px; bottom: 0; pointer-events: none; }
 #tracksHead { position: absolute; width: 1px; background: #fff; top: 0; bottom: 0; }
 #tracksHead::before { content: ''; position: absolute; left: -3px; top: -4px; width: 7px; height: 7px; background: #fff; transform: rotate(45deg); }
 
@@ -350,27 +356,31 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .bottom { padding: 9px 12px; }
 .transport { flex-wrap: wrap; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
 .editTools { gap: 5px; flex-wrap: wrap; }
-.editTools .toolIcon { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: auto; padding: 0 9px; }
+.editTools .toolIcon, .mediaTools .toolIcon { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: auto; padding: 0 9px; }
+.mediaTools { gap: 5px; }
+.mediaTools .toolIcon { color: #d9c4ff; }
 #removeSegment[hidden] { display: none; }
 #splitClip { background: #6832b2; border-color: #9655ec; }
 .tracksWrap { padding-right: 8px; }
 .elementRuler { position: relative; cursor: ew-resize; touch-action: none; border-bottom: 1px solid var(--line); margin-bottom: 5px; }
 .elementRuler span { border-left: 1px solid #454550; padding-left: 4px; }
-.videoTrackRow { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 8px; align-items: center; margin-top: 4px; }
+.videoTrackRow { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 8px; align-items: center; margin-top: 3px; }
 .videoTrackRow .trackLabel { cursor: default; }
-.timeline { height: 43px; margin: 0; }
-.timeline .track { top: 0; height: 43px; border-radius: 6px; background: #101015; }
-.timeline .range { top: 2px; height: 39px; border-radius: 5px; background: linear-gradient(135deg, #46316a, #312644); color: #f0e7ff; text-align: left; padding: 0 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 12px ui-monospace, Consolas, monospace; }
+.timeline { height: 31px; margin: 0; }
+.timeline .track { top: 0; height: 31px; border-radius: 5px; background: #101015; }
+.timeline .range { top: 2px; height: 27px; border-radius: 4px; background: linear-gradient(135deg, #46316a, #312644); color: #f0e7ff; text-align: left; padding: 0 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 11px ui-monospace, Consolas, monospace; }
 .timeline .range.active { background: linear-gradient(135deg, #674294, #43305f); box-shadow: inset 0 0 0 1px #e4cfff; border-color: #e4cfff; }
-.timeline .handle { top: 1px; height: 41px; width: 10px; margin-left: -5px; box-shadow: 0 1px 5px #0006; }
-.timeline .handle::after { content: ''; position: absolute; left: 4px; top: 14px; width: 2px; height: 12px; background: #625079; border-radius: 2px; }
+.timeline .range.sequenceRange { background: linear-gradient(135deg, #245267, #213c54); border-color: #4ca5c9; }
+.timeline .range.sequenceRange.active { background: linear-gradient(135deg, #32708b, #29506e); border-color: #b9edff; box-shadow: inset 0 0 0 1px #b9edff; }
+.timeline .handle { top: 1px; height: 29px; width: 10px; margin-left: -5px; box-shadow: 0 1px 5px #0006; }
+.timeline .handle::after { content: ''; position: absolute; left: 4px; top: 9px; width: 2px; height: 10px; background: #625079; border-radius: 2px; }
 .timeline .playhead { display: none; }
 .timeline .cutGap { top: 2px; bottom: 2px; }
 .timeline .cutGap { min-width: 16px; border: 1px solid #da7777; border-radius: 4px; color: #ffe1e1; cursor: pointer; pointer-events: auto; overflow: hidden; white-space: nowrap; font: 11px system-ui, sans-serif; }
 .timeline .rippleCut { z-index: 5; }
 .timeline .cutGap:hover, .timeline .cutGap:focus-visible { background: #63333e; border-color: #ffb3b3; outline: 1px solid #ffb3b3; outline-offset: 1px; }
 .timeline .cutGap span { display: block; overflow: hidden; }
-.timeline .kf { top: 27px; }
+.timeline .kf { top: 16px; }
 .timeline .splitMarker::before { display: none; }
 .timeline .splitMarker::after { top: 2px; bottom: 2px; background: #c3a4ef; }
 .tracksHeadWrap { right: 8px; z-index: 6; }
@@ -382,9 +392,32 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .scrubHandle:active { cursor: grabbing; }
 .scrubHandle:focus-visible { outline: 2px solid #ffca79; outline-offset: -2px; border-radius: 5px; }
 .range:focus-visible, .bottom button:focus-visible { outline: 2px solid #d8baff; outline-offset: 2px; }
+
+/* Áudio: faixa compacta, mas com pegas largas e confortáveis. */
+.audioTrackRow { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 8px; height: 23px; margin-top: 2px; }
+.audioTrackRow .trackLabel { display: flex; align-items: center; gap: 4px; padding-block: 2px; color: #9ee6d4; }
+.audioLane { position: relative; min-width: 0; overflow: hidden; border-radius: 4px; background: #101715; }
+.audioBlock { position: absolute; top: 1px; bottom: 1px; min-width: 5px; display: flex; align-items: center; overflow: hidden; border: 1px solid #25866d; border-radius: 4px; background: linear-gradient(135deg, #174d42, #173b36); color: #d8fff5; cursor: grab; touch-action: none; }
+.audioBlock.on { border-color: #a7f3d0; box-shadow: inset 0 0 0 1px #a7f3d0; }
+.audioBlock.muted { opacity: .5; }
+.audioWave { flex: 1; min-width: 0; padding: 0 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; background: repeating-linear-gradient(90deg, transparent 0 3px, #66d7ba40 3px 4px); }
+.audioGrip { position: absolute; z-index: 2; left: -5px; top: -5px; bottom: -5px; width: 16px; cursor: ew-resize; }
+.audioGrip::after { content: ''; position: absolute; left: 7px; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: #d8fff5; }
+.audioGrip.end { left: auto; right: -5px; }
+.audioMute { width: 20px; height: 20px; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.audioOptions .audioValue { min-width: 36px; text-align: right; }
+.appendSkeletonRow { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 8px; height: 23px; margin-top: 2px; }
+.appendSkeletonRow[hidden] { display: none; }
+.appendSkeletonRow .trackLabel { cursor: default; color: #cbb6ee; }
+.appendSkeletonLane { position: relative; overflow: hidden; border-radius: 4px; background: #111017; }
+.appendSkeletonBlock { position: absolute; inset: 1px 0 1px auto; width: clamp(150px, 28%, 300px); display: flex; align-items: center; overflow: hidden; border: 1px solid #6c568c; border-radius: 4px; color: #eadfff; background: #2c2338; }
+.appendSkeletonBlock::before { content: ''; position: absolute; inset: 0; transform: translateX(-110%); background: linear-gradient(90deg, transparent, #b98cff45, transparent); animation: timelineSkeleton 1.05s ease-in-out infinite; }
+.appendSkeletonBlock span { position: relative; padding: 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+@keyframes timelineSkeleton { to { transform: translateX(110%); } }
+@media (prefers-reduced-motion: reduce) { .appendSkeletonBlock::before { animation: none; background: #b98cff24; transform: none; } }
 @media (max-width: 1000px) {
   .bottom { padding: 10px; }
-  .editTools { margin-left: 0; padding-left: 0; border-left: 0; }
+  .editTools, .mediaTools { margin-left: 0; padding-left: 0; border-left: 0; }
 }
 
 /* legenda + exportar para o TikTok */

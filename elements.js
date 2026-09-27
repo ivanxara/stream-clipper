@@ -89,10 +89,10 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
     const copy = { ...cleanElements([e])[0], id: crypto.randomUUID(), x: clamp(e.x + .035, 0, 1), y: clamp(e.y + .035, 0, 1), z: nextZ() };
     (e.mediaId ? st.images : st.texts).push(copy); commit(); select(copy.id, true);
   }
-  function addImage(id) {
+  function addImage(id, props = {}) {
     const m = mediaItem(id); if (!m || !['image', 'video', 'gif'].includes(m.type) || st.busy) return;
     commit();
-    const e = { id: crypto.randomUUID(), mediaId: id, x: .5, y: .5, size: .4, rotation: 0, z: nextZ(), in: 0, out: null };
+    const e = { id: crypto.randomUUID(), mediaId: id, x: .5, y: .5, size: .4, rotation: 0, z: nextZ(), in: 0, out: null, ...props };
     st.images.push(e); commit(); select(e.id, true);
   }
   function hit(ev) {

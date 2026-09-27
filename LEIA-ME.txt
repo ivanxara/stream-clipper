@@ -48,7 +48,7 @@ EDITOR PARA TIKTOK
   T novo texto · Delete apaga o elemento selecionado · Esc tira a seleção · Ctrl+D duplica ·
   Ctrl+Z desfaz a última edição do vídeo ou dos elementos · Ctrl+Shift+Z refaz. Com um elemento selecionado, as setas
   movem-no no visor (Shift = passos maiores); sem seleção, ← → avançam/recuam um frame.
-- Na timeline, «Remover» aparece depois de dividires o vídeo; escolhe se queres manter o espaço vazio ou deslocar o conteúdo seguinte. Com um elemento selecionado, o botão passa a «Apagar elemento». Ambas as remoções podem ser desfeitas com Ctrl+Z; o marcador ↶ também repõe o trecho. Seleciona o trecho a retirar
+- Na timeline, «Remover» aparece depois de dividires o vídeo; escolhe se queres manter o espaço vazio ou deslocar o conteúdo seguinte. Com um elemento, áudio ou vídeo adicional selecionado, o botão passa a uma ação «Apagar» direta, sem seta. Estas remoções podem ser desfeitas com Ctrl+Z; o marcador ↶ também repõe o trecho. Seleciona o trecho a retirar
   e usa o menu «Remover», Delete, Shift+Delete ou o botão direito. As pontas brancas ajustam o início e o fim por arrasto.
   No botão direito de um segmento, «Duplicar segmento» insere uma cópia a seguir ao original na exportação; as cópias aparecem empilhadas e podem ser selecionadas/removidas separadamente.
   Para percorrer o vídeo, arrasta o marcador amarelo ou arrasta em qualquer ponto da régua de tempo.
@@ -79,6 +79,19 @@ EDITOR PARA TIKTOK
   textos. O botão «ⓘ Ajuda» junto à exportação abre as instruções e atalhos.
   A lateral está dividida em três cards: Cena / modo (formatos e enquadramento),
   Elementos e Exportação.
+- VÍDEO E MÚSICA: os botões «+ Vídeo» e «+ Música» junto às ferramentas de corte evitam passar
+  pela biblioteca. «+ Vídeo» anexa um ou vários clips ao fim da faixa principal, com o respetivo
+  som, e aumenta imediatamente a duração da timeline. O novo segmento pode logo ser cortado,
+  dividido ou removido. Para sobrepor um vídeo ao principal, usa
+  «Adicionar elemento» → «Ficheiro». «+ Música» cria uma faixa verde
+  por baixo do vídeo. Arrasta o bloco para posicionar a música e as pegas das pontas para escolher
+  o trecho; seleciona-o para ajustar volume (0–200%), entrada/saída suave, silenciar ou apagar.
+  A pré-escuta acompanha o play/pausa e a exportação mistura todas as faixas com o som original.
+  As faixas da timeline são compactas para mostrar mais camadas sem perder pegas fáceis de agarrar.
+  Enquanto os metadados são lidos aparece uma faixa skeleton animada com a fase atual; depois o
+  clip entra imediatamente na timeline, sem esperar por conversões. A consolidação fica para a
+  exportação: clips com codec, resolução, FPS e áudio compatíveis são unidos sem recodificar;
+  formatos diferentes usam automaticamente a conversão segura nessa altura e podem demorar mais.
 - TEXTOS (qualquer formato): «Adicionar elemento» → «Texto» (ou T) põe um texto no resultado já pronto a escrever.
   No resultado: arrasta para mover (encaixa no centro, nos terços e na divisão câmara/jogo; Alt
   desliga o encaixe), roda do rato = tamanho, duplo clique = editar. No painel: cor, estilo
@@ -86,7 +99,7 @@ EDITOR PARA TIKTOK
   (↔ centrar, ↕ centrar, Cima, Divisão, Baixo). Enter = nova linha; linhas compridas partem sozinhas.
   O próximo texto usa o último estilo. «Manter nos próximos clips» deixa esse texto fixo.
 - TEMPLATES (barra de cima): «Guardar novo» abre um diálogo para criar um template com TUDO o que está montado (formato, câmara/jogo, altura,
-  imagem/vídeo e o tamanho/posição, moldura Vertical, textos e imagens livres com rotação e duração).
+  imagem/vídeo e o tamanho/posição, moldura Vertical, textos, imagens livres e faixas de áudio com os respetivos ajustes).
   Escolhe-o na lista para aplicar; os tempos dos elementos mantêm a distância ao fim do clip, adaptando-se à duração
   do novo vídeo;
   o último escolhido é aplicado sozinho quando abres o editor. «Atualizar» guarda diretamente
@@ -143,8 +156,8 @@ EDITOR PARA TIKTOK
   normalmente 1-3 segundos para um clip de 30s.
 - Se a exportação encravar, acaba sozinha ao fim de uns segundos (ou mostra o erro) e os botões
   voltam: é só exportar outra vez. Durante a exportação há «✕ Cancelar».
-- Refresh / fechar sem querer: o editor volta a abrir o último clip com o corte, as posições ◆ e
-  os textos e imagens livres como estavam, incluindo posição, tamanho, rotação e duração
+- Refresh / fechar sem querer: o editor volta a abrir o último clip com o corte, as posições ◆,
+  os textos, imagens livres e faixas de áudio como estavam, incluindo posição, tamanho, rotação e duração
   («edição recuperada» em baixo).
 - O seletor «Recentes» no topo guarda até 12 clips de origem e recupera a edição de cada um.
   No botão direito de um segmento da timeline, «Duplicar segmento» repete-o na montagem atual;
