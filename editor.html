@@ -67,8 +67,7 @@
           <button id="setIn" class="btn toolIcon" aria-label="Marcar início (I)" title="Marcar início (I)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3v18M19 7l-6 5 6 5M13 12H5"/></svg><span>In&#237;cio</span></button>
           <button id="setOut" class="btn toolIcon" aria-label="Marcar fim (O)" title="Marcar fim (O)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 6 5-6 5m0-5h14M19 3v18"/></svg><span>Fim</span></button>
           <button id="splitClip" class="btn toolIcon" aria-label="Dividir segmento (Ctrl+B)" title="Dividir segmento (Ctrl+B)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="m8 6.5 12 12M8 17.5l5.5-5.5M17 7l3-3M13.5 12H21"/></svg><span>Dividir</span></button>
-          <button id="deleteSegment" class="btn toolIcon danger" aria-label="Apagar trecho selecionado (Delete)" title="Apagar trecho selecionado (Delete)" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/></svg><span>Apagar trecho</span></button>
-          <button id="rippleDelete" class="btn toolIcon danger" aria-label="Apagar segmento e fechar espaço (Shift+Delete)" title="Apagar segmento e fechar espaço (Shift+Delete)" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7m4 0h7M7 4l3 3-3 3m10-6-3 3 3 3M4 17h16M8 14l-4 3 4 3m8-6 4 3-4 3"/></svg><span>Fechar espaço</span></button>
+          <button id="removeSegment" class="btn toolIcon danger" aria-label="Remover segmento" title="Remover segmento" aria-haspopup="menu" aria-expanded="false" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/></svg><span>Remover</span><svg class="menuChevron" viewBox="0 0 12 12" aria-hidden="true"><path d="m2 4 4 4 4-4"/></svg></button>
         </div>
         <span class="spacer"></span>
       </div>
@@ -121,8 +120,8 @@
   </div>
   <div id="videoContextMenu" class="elementContextMenu" role="menu" aria-label="Ações do vídeo" hidden>
     <button role="menuitem" data-video-action="split">Dividir aqui <kbd>Ctrl B</kbd></button>
-    <button role="menuitem" data-video-action="delete">Apagar trecho <kbd>Del</kbd></button>
-    <button role="menuitem" data-video-action="rippleDelete">Apagar e fechar espaço <kbd>Shift Del</kbd></button>
+    <button role="menuitem" data-video-action="delete">Remover, manter espaço <kbd>Del</kbd></button>
+    <button role="menuitem" data-video-action="rippleDelete">Remover e deslocar o resto <kbd>Shift Del</kbd></button>
     <button role="menuitem" data-video-action="restore">Repor trecho</button>
     <button role="menuitem" data-video-action="restoreAll">Repor vídeo completo</button>
   </div>
@@ -143,14 +142,14 @@
       <div class="hrow"><b id="helpTitle">Ajuda e atalhos</b><button class="btn small" aria-label="Fechar ajuda" autofocus>✕</button></div>
       <p>Seleciona um elemento no visor ou na timeline. Arrasta para mover, usa os cantos para redimensionar e a pega ↻ para rodar.</p>
       <p>Em «Adicionar elemento» → «Ficheiro», carrega imagens, GIFs ou vídeos MOV/MP4 e clica numa miniatura para adicionar ao visor. GIFs e vídeos repetem sem som durante o intervalo do elemento; a animação também fica na exportação.</p>
-      <p>Na timeline, arrasta o marcador amarelo ou a régua de tempo para percorrer o vídeo. Com um elemento selecionado, Início/Fim e Dividir atuam nesse elemento; sem seleção, atuam no vídeo. Usa «Apagar trecho» para deixar um espaço vazio ou «Fechar espaço» para remover o segmento e deslocar o que vem depois. O marcador ↶ repõe qualquer corte; no menu do vídeo podes repor o vídeo completo.</p>
+      <p>Na timeline, arrasta o marcador amarelo ou a régua de tempo para percorrer o vídeo. Com um elemento selecionado, Início/Fim e Dividir atuam nesse elemento; sem seleção, atuam no vídeo. Em «Remover», escolhe se o espaço fica vazio ou se o conteúdo seguinte avança para o ocupar. O marcador ↶ repõe qualquer corte; no menu do vídeo podes repor o vídeo completo.</p>
       <p>No Streamer, arrasta a divisão verde para ajustar a altura da câmara. Clica na zona de baixo para mover o conteúdo e ajustar o zoom pelos cantos da moldura azul.</p>
       <p>No Desfocado e Original, usa «Zoom do vídeo», os botões − / + ou a roda do rato sobre o vídeo para aproximar até 400%. Arrasta para enquadrar e usa «Repor enquadramento» para voltar ao início. O zoom fica no vídeo exportado.</p>
       <dl class="shortcutList">
         <dt>Play / pausa</dt><dd><kbd>Espaço</kbd> / <kbd>K</kbd></dd>
         <dt>Marcar início / fim</dt><dd><kbd>I</kbd> / <kbd>O</kbd></dd>
         <dt>Dividir no cursor / apagar segmento</dt><dd><kbd>Ctrl+B</kbd> / <kbd>Delete</kbd></dd>
-        <dt>Apagar e fechar espaço</dt><dd><kbd>Shift+Delete</kbd></dd>
+        <dt>Remover e deslocar o resto</dt><dd><kbd>Shift+Delete</kbd></dd>
         <dt>Mover seleção / avançar frame</dt><dd><kbd>←</kbd> <kbd>→</kbd></dd>
         <dt>Adicionar texto</dt><dd><kbd>T</kbd></dd>
         <dt>Apagar / duplicar</dt><dd><kbd>Del</kbd> / <kbd>Ctrl D</kbd></dd>

@@ -459,15 +459,14 @@ function getRanges() {
 
 function updateTimelineTools() {
   const hasElement = !!elementEditor?.selected();
-  const deleteButton = $('#deleteSegment');
-  deleteButton.hidden = hasElement ? false : getRanges().length < 2;
-  deleteButton.disabled = st.busy || (!hasElement && getRanges().length < 2);
-  deleteButton.querySelector('span').textContent = hasElement ? 'Apagar elemento' : 'Apagar trecho';
-  deleteButton.title = hasElement ? 'Apagar elemento selecionado (Delete)' : 'Apagar trecho selecionado (Delete)';
-  deleteButton.setAttribute('aria-label', deleteButton.title);
-  const rippleButton = $('#rippleDelete');
-  rippleButton.hidden = hasElement || getRanges().length < 2;
-  rippleButton.disabled = st.busy || hasElement || getRanges().length < 2;
+  const removeButton = $('#removeSegment');
+  removeButton.hidden = hasElement ? false : getRanges().length < 2;
+  removeButton.disabled = st.busy || (!hasElement && getRanges().length < 2);
+  removeButton.querySelector('span').textContent = hasElement ? 'Apagar elemento' : 'Remover';
+  removeButton.querySelector('.menuChevron').hidden = hasElement;
+  removeButton.title = hasElement ? 'Apagar elemento selecionado (Delete)' : 'Remover segmento selecionado';
+  removeButton.setAttribute('aria-label', removeButton.title);
+  removeButton.setAttribute('aria-haspopup', hasElement ? 'false' : 'menu');
   $('#setIn').title = hasElement ? 'Marcar início do elemento selecionado (I)' : 'Marcar início (I)';
   $('#setIn').setAttribute('aria-label', hasElement ? 'Marcar início do elemento (I)' : 'Marcar início (I)');
   $('#setOut').title = hasElement ? 'Marcar fim do elemento selecionado (O)' : 'Marcar fim (O)';
@@ -808,19 +807,42 @@ function splitSelection() {
   } else splitPart();
 }
 $('#splitClip').addEventListener('click', splitSelection);
-$('#deleteSegment').addEventListener('click', () => elementEditor?.selected() ? elementEditor.remove() : deletePart());
-$('#rippleDelete').addEventListener('click', rippleDeletePart);
 const videoMenu = $('#videoContextMenu');
 let videoMenuTarget = null;
 function closeVideoMenu(restoreFocus = false) {
   videoMenu.hidden = true;
+  $('#removeSegment').setAttribute('aria-expanded', 'false');
   if (videoMenu.contains(document.activeElement)) document.activeElement.blur();
   if (restoreFocus && videoMenuTarget) {
-    const selector = videoMenuTarget.kind === 'gap' ? '.cutGap' : '.range.active';
-    tl.querySelector(selector)?.focus();
+    if (videoMenuTarget.kind === 'toolbar') $('#removeSegment').focus();
+    else {
+      const selector = videoMenuTarget.kind === 'gap' ? '.cutGap' : '.range.active';
+      tl.querySelector(selector)?.focus();
+    }
   }
   videoMenuTarget = null;
 }
+function showRemoveMenu(e) {
+  if (!st.mp4 || st.busy || elementEditor?.selected() || getRanges().length < 2) return;
+  e.preventDefault();
+  e.stopPropagation();
+  videoMenuTarget = { kind: 'toolbar' };
+  videoMenu.querySelector('[data-video-action="split"]').hidden = true;
+  videoMenu.querySelector('[data-video-action="delete"]').hidden = false;
+  videoMenu.querySelector('[data-video-action="rippleDelete"]').hidden = false;
+  videoMenu.querySelector('[data-video-action="restore"]').hidden = true;
+  videoMenu.querySelector('[data-video-action="restoreAll"]').hidden = true;
+  videoMenu.hidden = false;
+  const rect = $('#removeSegment').getBoundingClientRect();
+  videoMenu.style.left = `${clamp(rect.left, 8, innerWidth - videoMenu.offsetWidth - 8)}px`;
+  videoMenu.style.top = `${clamp(rect.bottom, 8, innerHeight - videoMenu.offsetHeight - 8)}px`;
+  $('#removeSegment').setAttribute('aria-expanded', 'true');
+  videoMenu.querySelector('button:not([hidden]):not(:disabled)')?.focus();
+}
+$('#removeSegment').addEventListener('click', e => {
+  if (elementEditor?.selected()) elementEditor.remove();
+  else showRemoveMenu(e);
+});
 function showVideoMenu(e) {
   const target = e.target.closest('.range, .cutGap');
   if (!target || !st.mp4 || st.busy) return;
@@ -851,6 +873,7 @@ function showVideoMenu(e) {
   videoMenu.querySelector('[data-video-action="restore"]').hidden = !gap;
   videoMenu.querySelector('[data-video-action="restoreAll"]').hidden = gap || !(st.parts?.length || st.start > .05 || st.end < st.dur - .05);
   videoMenu.hidden = false;
+  $('#removeSegment').setAttribute('aria-expanded', 'false');
   const x = e.clientX || rect.left + rect.width / 2, y = e.clientY || rect.bottom;
   videoMenu.style.left = `${clamp(x, 8, innerWidth - videoMenu.offsetWidth - 8)}px`;
   videoMenu.style.top = `${clamp(y, 8, innerHeight - videoMenu.offsetHeight - 8)}px`;
@@ -870,7 +893,8 @@ videoMenu.addEventListener('click', e => {
   else if (action === 'rippleDelete') rippleDeletePart();
   else if (action === 'restore') restoreGap(target.start, target.end);
   else if (action === 'restoreAll') restoreFullVideo();
-  tl.querySelector('.range.active')?.focus();
+  if (target.kind === 'toolbar') $('#removeSegment').focus();
+  else tl.querySelector('.range.active')?.focus();
 });
 videoMenu.addEventListener('keydown', e => {
   e.stopPropagation();
@@ -1391,12 +1415,21 @@ async function replaceLibraryFile(id, file) {
 // {id, text, x, y (centro do bloco, 0..1 do resultado), size (altura da letra / largura), color,
 //  style: 'outline'|'box'|'plain', align: 'left'|'center'|'right', font, keep}
 const FONTS = {
+  montserrat: ['Montserrat ExtraBold', (px) => `800 ${px}px "Montserrat", Arial, sans-serif`],
+  anton: ['Anton', (px) => `400 ${px}px "Anton", Impact, sans-serif`],
+  bebas: ['Bebas Neue', (px) => `400 ${px}px "Bebas Neue", Impact, sans-serif`],
   moderna: ['Moderna', (px) => `800 ${px}px "Segoe UI", system-ui, sans-serif`],
   classica: ['Clássica', (px) => `900 ${px}px "Arial Black", Arial, sans-serif`],
   impacto: ['Impacto', (px) => `${px}px Impact, "Arial Narrow Bold", sans-serif`],
 };
+const TEXT_PRESETS = [
+  { id: 'subtitle', name: 'Subtítulo', sample: 'Aa', title: 'Legenda branca, forte e legível', values: { font: 'montserrat', size: 0.057, color: '#ffffff', style: 'outline', align: 'center', uppercase: false, y: 0.78 } },
+  { id: 'box', name: 'Caixa', sample: 'Aa', title: 'Texto branco sobre caixa preta', values: { font: 'montserrat', size: 0.064, color: '#000000', style: 'box', align: 'center', uppercase: false, y: 0.76 } },
+  { id: 'highlight', name: 'Destaque', sample: 'WOW', title: 'Palavra de impacto em amarelo', values: { font: 'anton', size: 0.084, color: '#ffe600', style: 'outline', align: 'center', uppercase: true, y: 0.56 } },
+  { id: 'headline', name: 'Título', sample: 'WOW', title: 'Título condensado em maiúsculas', values: { font: 'bebas', size: 0.12, color: '#ffffff', style: 'outline', align: 'center', uppercase: true, y: 0.22 } },
+];
 const TEXT_COLORS = ['#ffffff', '#ffe600', '#ff3b5c', '#25f4ee', '#22c55e', '#000000'];
-const TEXT_STYLE_KEYS = ['size', 'color', 'style', 'align', 'font'];
+const TEXT_STYLE_KEYS = ['size', 'color', 'style', 'align', 'font', 'uppercase'];
 let textSeq = 0;
 
 const loadJSON = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
@@ -1441,14 +1474,15 @@ function drawTexts(ctx, W, H, time, elementMedia) {
       t._box = { x: t.x - w / W / 2, y: t.y - h / H / 2, w: w / W, h: h / H };
       continue;
     }
-    if (!t.text.trim()) { t._box = null; continue; }
+    const text = t.uppercase ? t.text.toLocaleUpperCase() : t.text;
+    if (!text.trim()) { t._box = null; continue; }
     const px = Math.max(4, t.size * W), lh = px * 1.2, pad = t.style === 'box' ? px * 0.28 : px * 0.12;
     ctx.save();
     ctx.translate(t.x * W, t.y * H); ctx.rotate((t.rotation || 0) * Math.PI / 180); ctx.translate(-t.x * W, -t.y * H);
     ctx.font = (FONTS[t.font] || FONTS.moderna)[1](px);
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
-    const lines = wrapText(ctx, t.text, W * 0.9 - pad * 2);
+    const lines = wrapText(ctx, text, W * 0.9 - pad * 2);
     const widths = lines.map((l) => ctx.measureText(l).width);
     const bw = Math.max(...widths), bh = lines.length * lh;
     const cx = t.x * W, cy = t.y * H, left = cx - bw / 2, top = cy - bh / 2;
@@ -1486,7 +1520,7 @@ function drawTexts(ctx, W, H, time, elementMedia) {
 function addText() {
   if (st.busy) return;
   elementEditor?.commit();
-  const d = { size: 0.075, color: '#ffffff', style: 'outline', align: 'center', font: 'moderna', ...loadJSON('sc.textStyle', {}) };
+  const d = { size: 0.075, color: '#ffffff', style: 'outline', align: 'center', font: 'montserrat', uppercase: false, ...loadJSON('sc.textStyle', {}) };
   let y = st.layout === 'streamer' ? st.streamer.split : 0.2;
   while (y < 0.9 && st.texts.some((t) => Math.abs(t.y - y) < 0.04)) y = Math.min(0.92, y + 0.09);
   const t = { id: 'T' + ++textSeq, text: 'Texto', x: 0.5, y, keep: false, ...d, rotation: 0, z: elementEditor?.nextZ() || 0, in: 0, out: null };
@@ -1568,6 +1602,10 @@ function renderTextOpts() {
   elementEditor?.renderTracks();
   const o = $('#textOpts'), t = elementPanel ? null : selText();
   const selected = elementPanel ? null : elementEditor?.selected();
+  const presetButtons = t ? TEXT_PRESETS.map(preset => {
+    const active = Object.entries(preset.values).filter(([key]) => key !== 'y').every(([key, value]) => t[key] === value);
+    return `<button type="button" class="textPreset${active ? ' on' : ''}" data-text-preset="${preset.id}" aria-pressed="${active}" title="${preset.title}"><span class="presetPreview presetPreview--${preset.id}">${preset.sample}</span><span class="presetName">${preset.name}</span></button>`;
+  }).join('') : '';
   const chips = orderedElements(st).reverse().map((x, i) =>
     `<div class="elementRow${x.id === st.textSel ? ' on' : ''}"><button class="elementSelect" data-tid="${x.id}" title="Selecionar"><span class="elementType" aria-hidden="true">${x.mediaId ? (libItem(x.mediaId)?.thumb ? `<img src="${esc(libItem(x.mediaId).thumb)}" alt="">` : '▧') : 'T'}</span><span class="elementName">${esc(x.mediaId ? (libItem(x.mediaId)?.name || 'Imagem') : x.text.split('\n')[0].slice(0, 40) || 'Texto ' + (i + 1))}</span></button></div>`).join('');
   o.innerHTML = `<div class="opt">
@@ -1578,6 +1616,7 @@ function renderTextOpts() {
     </div>` : ''}
     ${chips ? `<div class="elementList">${chips}</div>` : ''}
     ${t ? `<textarea id="tText" aria-label="Texto do elemento" rows="2" placeholder="Escreve aqui…">${esc(t.text)}</textarea>` : ''}
+    ${t ? `<section class="textPresetGroup" aria-label="Presets de texto"><h3>Presets para clips</h3><div class="textPresetGrid">${presetButtons}</div></section>` : ''}
     ${selected ? `<details id="elementOptions" class="elementOptions"${expandedElementOptions.has(selected.id) ? ' open' : ''}><summary>${t ? 'Estilo e posição' : 'Ajustes do ficheiro'}</summary><div class="opt">
       <label>Rotação <input id="elementAngle" type="number" min="-360" max="360" step="1" value="${selected.rotation || 0}"> °</label>
       <button id="elementCenter" class="btn small">Centrar no visor</button>` : ''}
@@ -1590,6 +1629,7 @@ function renderTextOpts() {
     <label>Tamanho <input id="tSize" type="range" min="0.02" max="0.25" step="0.001" value="${t.size}"> <span class="mono" id="tSizeV">${Math.round(t.size * 1000) / 10}</span></label>
     <div class="row tools">
       <div class="seg s3 icons">${['left', 'center', 'right'].map((a) => `<button data-talign="${a}" title="Alinhar ${{ left: 'à esquerda', center: 'ao centro', right: 'à direita' }[a]}"${t.align === a ? ' class="on"' : ''}>${ALIGN_ICONS[a]}</button>`).join('')}</div>
+      <button id="tUppercase" class="btn small uppercaseToggle${t.uppercase ? ' on' : ''}" aria-label="Maiúsculas" aria-pressed="${!!t.uppercase}" title="Alternar maiúsculas">Aa</button>
       <select id="tFont" title="Letra">${Object.entries(FONTS).map(([k, [n]]) => `<option value="${k}"${t.font === k ? ' selected' : ''}>${n}</option>`).join('')}</select>
     </div>
     <div class="row pos">
@@ -1634,6 +1674,11 @@ function renderTextOpts() {
   o.querySelector('#tColor').addEventListener('change', () => renderTextOpts());
   o.querySelectorAll('[data-tstyle]').forEach((b) => b.addEventListener('click', () => set({ style: b.dataset.tstyle })));
   o.querySelectorAll('[data-talign]').forEach((b) => b.addEventListener('click', () => set({ align: b.dataset.talign })));
+  o.querySelectorAll('[data-text-preset]').forEach((b) => b.addEventListener('click', () => {
+    const preset = TEXT_PRESETS.find(x => x.id === b.dataset.textPreset);
+    if (preset) set(preset.values);
+  }));
+  o.querySelector('#tUppercase').addEventListener('click', () => set({ uppercase: !t.uppercase }));
   o.querySelector('#tSize').addEventListener('input', (e) => { t.size = +e.target.value; syncTextSize(); saveTexts(); });
   o.querySelector('#tFont').addEventListener('change', (e) => set({ font: e.target.value }));
   o.querySelectorAll('[data-tpos]').forEach((b) => b.addEventListener('click', () => {
@@ -2036,7 +2081,17 @@ async function encodeVideo(onProgress) {
   } finally { for (const close of cleanup) close(); }
 }
 
+async function loadTextFonts() {
+  if (!document.fonts?.load) return;
+  const fonts = [...new Set(st.texts.filter(t => t.text?.trim()).map(t => t.font || 'moderna'))];
+  await Promise.all(fonts.map(font => {
+    const definition = FONTS[font] || FONTS.moderna;
+    return document.fonts.load(definition[1](48), 'Aaáçõ').catch(() => []);
+  }));
+}
+
 async function encodeVideoFrames(onProgress, assets) {
+  await loadTextFonts();
   const { mp4, buf } = st;
   const { w: W, h: H } = outSize();
   const fps = mp4.fps >= 45 ? 60 : Math.min(30, Math.max(24, Math.round(mp4.fps)));

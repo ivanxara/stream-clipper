@@ -48,8 +48,8 @@ EDITOR PARA TIKTOK
   T novo texto · Delete apaga o elemento selecionado · Esc tira a seleção · Ctrl+D duplica ·
   Ctrl+Z desfaz a última edição do vídeo ou dos elementos · Ctrl+Shift+Z refaz. Com um elemento selecionado, as setas
   movem-no no visor (Shift = passos maiores); sem seleção, ← → avançam/recuam um frame.
-- Na timeline, «Apagar trecho» só aparece depois de dividires o vídeo; com um elemento selecionado, o botão passa a «Apagar elemento». «Fechar espaço» apaga o segmento e compacta o vídeo e os elementos seguintes; clica no marcador ↶ para repor o trecho. Seleciona o trecho a retirar
-  e usa esse botão, Delete ou o botão direito. As pontas brancas ajustam o início e o fim por arrasto.
+- Na timeline, «Remover» aparece depois de dividires o vídeo; escolhe se queres manter o espaço vazio ou deslocar o conteúdo seguinte. Com um elemento selecionado, o botão passa a «Apagar elemento». Ambas as remoções podem ser desfeitas com Ctrl+Z; o marcador ↶ também repõe o trecho. Seleciona o trecho a retirar
+  e usa o menu «Remover», Delete, Shift+Delete ou o botão direito. As pontas brancas ajustam o início e o fim por arrasto.
   Para percorrer o vídeo, arrasta o marcador amarelo ou arrasta em qualquer ponto da régua de tempo.
   Para recuperar um trecho apagado, clica na zona riscada e escolhe «Repor trecho»; também está
   disponível pelo botão direito. O menu do vídeo tem «Repor vídeo completo» para recuperar todos
@@ -72,9 +72,10 @@ EDITOR PARA TIKTOK
   continuam acessíveis mesmo em elementos muito curtos. O encaixe ajuda a alinhar tempos; Alt desliga-o.
   Clicar numa faixa seleciona o elemento e, se necessário, salta para o início dele.
   Botão direito numa faixa de texto/imagem abre «Duplicar» e «Apagar». Na lista à direita,
-  cada elemento ocupa uma linha para o selecionares. A caixa de texto aparece logo;
-  a seta «Estilo e posição» expande os ajustes menos frequentes. O último estilo continua a
-  ser usado nos novos textos. O botão «ⓘ Ajuda» junto à exportação abre as instruções e atalhos.
+  cada elemento ocupa uma linha para o selecionares. A caixa de texto e os presets Subtítulo,
+  Caixa, Destaque e Título aparecem logo; «Estilo e posição» expande os ajustes detalhados.
+  Os presets usam Montserrat, Anton e Bebas Neue; o último estilo continua a ser usado nos novos
+  textos. O botão «ⓘ Ajuda» junto à exportação abre as instruções e atalhos.
   A lateral está dividida em três cards: Cena / modo (formatos e enquadramento),
   Elementos e Exportação.
 - TEXTOS (qualquer formato): «Adicionar elemento» → «Texto» (ou T) põe um texto no resultado já pronto a escrever.

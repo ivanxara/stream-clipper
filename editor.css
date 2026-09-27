@@ -79,6 +79,7 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .editTools { display: flex; align-items: center; gap: 3px; margin-left: 4px; padding-left: 8px; border-left: 1px solid var(--line); }
 .toolIcon { display: inline-grid; place-items: center; width: 32px; height: 30px; padding: 0; border-radius: 5px; }
 .toolIcon svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.toolIcon .menuChevron { width: 12px; height: 12px; margin-left: -3px; }
 .toolIcon.danger { color: #fca5a5; }
 .spacer { flex: 1; }
 .timeline { position: relative; height: 34px; margin: 2px 8px 0; cursor: pointer; touch-action: none; }
@@ -182,6 +183,28 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .tpl .btn { white-space: nowrap; }
 @media (max-width: 1000px) { .tpl { flex-wrap: wrap; } .tpl select { min-width: 220px; max-width: calc(100vw - 40px); } }
 
+@font-face {
+  font-family: Anton;
+  src: url("fonts/Anton-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Bebas Neue";
+  src: url("fonts/BebasNeue-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: Montserrat;
+  src: url("fonts/Montserrat-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700 900;
+  font-display: swap;
+}
+
 /* textos */
 #textOpts { margin: 0; }
 .hrow { display: flex; align-items: center; justify-content: space-between; }
@@ -218,6 +241,21 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .chip.on { border-color: var(--accent); background: rgba(145, 70, 255, .22); }
 #tText { width: 100%; resize: vertical; min-height: 44px; background: #1d1d24; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; font-weight: 600; }
 #tText:focus { outline: none; border-color: var(--accent); }
+.textPresetGroup { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.textPresetGroup h3 { margin: 0; color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.textPresetGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+.textPreset { display: flex; min-width: 0; align-items: center; gap: 8px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: #1d1d24; color: var(--text); text-align: left; cursor: pointer; font: inherit; font-size: 11px; }
+.textPreset:hover { border-color: #77717f; background: #25232d; }
+.textPreset.on, .textPreset[aria-pressed="true"] { border-color: var(--accent); background: #352149; }
+.textPreset:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+.presetPreview { display: grid; width: 46px; height: 28px; flex: none; place-items: center; overflow: hidden; border-radius: 4px; background: #111116; color: #fff; font-size: 15px; white-space: nowrap; }
+.presetPreview--subtitle { font-family: "Montserrat", sans-serif; font-weight: 900; -webkit-text-stroke: .45px #111; text-shadow: 1px 1px 1px #111; }
+.presetPreview--box { padding: 0 3px; background: #050505; font-family: "Montserrat", sans-serif; font-size: 13px; font-weight: 900; }
+.presetPreview--highlight { background: #ffe600; color: #111; font-family: Anton, Impact, sans-serif; font-size: 14px; }
+.presetPreview--headline { font-family: "Bebas Neue", Impact, sans-serif; font-size: 18px; -webkit-text-stroke: .4px #111; }
+.presetName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.uppercaseToggle { flex: none; min-width: 34px; padding: 4px 6px; font-weight: 800; }
+.uppercaseToggle.on { border-color: var(--accent); background: #352149; color: #fff; }
 .swatches { gap: 5px; }
 .sw { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--line); cursor: pointer; padding: 0; flex: none; }
 .sw.on { border-color: var(--accent-2); box-shadow: 0 0 0 2px var(--accent); }
@@ -299,7 +337,7 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .transport { flex-wrap: wrap; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
 .editTools { gap: 5px; flex-wrap: wrap; }
 .editTools .toolIcon { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: auto; padding: 0 9px; }
-#deleteSegment[hidden] { display: none; }
+#removeSegment[hidden] { display: none; }
 #splitClip { background: #6832b2; border-color: #9655ec; }
 .tracksWrap { padding-right: 8px; }
 .elementRuler { position: relative; cursor: ew-resize; touch-action: none; border-bottom: 1px solid var(--line); margin-bottom: 5px; }
