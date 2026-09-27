@@ -1,0 +1,84 @@
+{
+  "manifest_version": 3,
+  "name": "Stream Clipper",
+  "version": "0.5.1",
+  "description": "Grava clips de lives e VODs (YouTube, Twitch, Kick), edita para TikTok e manda para o TikTok Studio.",
+  "permissions": [
+    "downloads",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Ativar Stream Clipper"
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://www.twitch.tv/*",
+        "https://kick.com/*"
+      ],
+      "js": [
+        "server.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "yt-main.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://www.tiktok.com/*"
+      ],
+      "js": [
+        "tiktok.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "processor.html",
+        "processor.js",
+        "editor.html",
+        "editor.js",
+        "elements.js",
+        "editor.css",
+        "mp4.js",
+        "clipstore.js",
+        "media.js",
+        "lib/*"
+      ],
+      "matches": [
+        "https://www.youtube.com/*",
+        "https://www.twitch.tv/*",
+        "https://kick.com/*"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

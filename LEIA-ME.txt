@@ -1,0 +1,180 @@
+STREAM CLIPPER — extensão para Chrome/Edge/Brave
+
+INSTALAR
+1. Descompacta esta pasta num sítio fixo (não a apagues depois).
+2. Abre chrome://extensions  (no Edge: edge://extensions)
+3. Liga o "Modo de programador" (canto superior direito).
+4. Clica "Carregar descompactada" / "Load unpacked" e escolhe esta pasta.
+
+USAR
+- A extensão começa desligada. Clica no ícone Stream Clipper na barra do browser para a ligar;
+  o painel aparece nas páginas YouTube, Twitch ou Kick. Clica outra vez no ícone para desligar
+  e esconder o painel. O estado fica guardado entre sessões.
+- Abre uma live no YouTube, Twitch ou Kick. Com a extensão ligada, aparece um painel "Clipper"
+  no canto inferior direito.
+- Ponto VERDE = modo live (YouTube, Twitch e Kick): o clip é descarregado diretamente da live, a
+  partir do ponto onde estás, mesmo que não tenhas visto esse bocado (ex.: acabaste de abrir a aba).
+  Qualidade original (até 1080p) e com som mesmo com o player em mute.
+  No Kick, usa os segmentos HLS mais recentes disponíveis, que podem estar ligeiramente à frente do player.
+- Ponto vermelho a piscar = está a gravar o buffer do ecrã (guarda os últimos ~120s).
+  Serve de reserva se o modo live falhar ou a playlist Kick não tiver os segmentos pedidos.
+- Clica 15s / 30s / 45s / 60s / 120s (ou Alt+1 / Alt+2 / Alt+3 / Alt+4 / Alt+5) para guardar esse tempo para trás.
+- O botão «+» ao lado de cada duração começa um clip com até esse tempo de contexto e continua a gravar.
+  Clica no contador vermelho (ou Alt+R) para terminar e abrir o clip no editor.
+- ● REC (ao lado do 15s, ou Alt+R): começa a gravar A PARTIR DE AGORA, durante o tempo que quiseres.
+  Enquanto grava mostra o tempo; ❚❚ (ou Alt+P) pausa e ▶ continua (o tempo em pausa não entra no
+  clip). Clica outra vez no botão vermelho (■, ou Alt+R) para parar: o clip abre no editor.
+  Precisa do buffer ON (é a gravação do ecrã, não o modo live). Se o vídeo desaparecer a meio
+  (mudar de página), a gravação é fechada e guardada logo.
+- Os clips exportados vão para a pasta Transferências/StreamClips.
+- Botões mais claros = ainda não há tempo suficiente no buffer (o clip sai mais curto).
+- ON/OFF no painel desliga a extensão e esconde o painel; o ícone da barra faz o mesmo. Arrasta
+  o painel pelo título.
+
+EDITOR PARA TIKTOK
+- Cada clip abre automaticamente o editor numa aba nova; o ficheiro só é guardado quando
+  carregas em "Exportar MP4" (usa "Original" para guardar sem mudar o formato).
+  Se o browser bloquear a aba nova, o clip é guardado diretamente como antes.
+- O botão ✎ no painel volta a abrir o último clip no editor.
+- Ecrã do editor (cabe tudo sem scroll): à esquerda o clip original, ao centro o RESULTADO 9:16 em
+  grande, à direita as opções e o botão Exportar. Os formatos estão nas abas lá em cima.
+- Edita-se diretamente no resultado: arrasta para enquadrar e usa a roda do rato para zoom (na
+  câmara, no jogo, na moldura Vertical ou na imagem/vídeo). No original também dá para mexer nas caixas.
+- Tudo o que ajustas fica guardado logo e vale para as próximas vezes (mesmo depois de fechar o
+  browser): formato, altura da câmara, jogo/imagem, imagem escolhida e o tamanho/posição dela,
+  câmara de cada canal e a última moldura Vertical.
+- Atalhos: Espaço / K play-pausa · I / O início/fim do elemento selecionado (ou do vídeo sem seleção) · Ctrl+B divide o elemento selecionado (ou o vídeo sem seleção) · Delete apaga o elemento/segmento selecionado · Shift+Delete apaga o segmento e fecha o espaço
+  selecionado · ← → um frame · J / L ±1s · 1-4 formato · E exportar ·
+  T novo texto · Delete apaga o elemento selecionado · Esc tira a seleção · Ctrl+D duplica ·
+  Ctrl+Z desfaz a última edição do vídeo ou dos elementos · Ctrl+Shift+Z refaz. Com um elemento selecionado, as setas
+  movem-no no visor (Shift = passos maiores); sem seleção, ← → avançam/recuam um frame.
+- Na timeline, «Apagar trecho» só aparece depois de dividires o vídeo; com um elemento selecionado, o botão passa a «Apagar elemento». «Fechar espaço» apaga o segmento e compacta o vídeo e os elementos seguintes; clica no marcador ↶ para repor o trecho. Seleciona o trecho a retirar
+  e usa esse botão, Delete ou o botão direito. As pontas brancas ajustam o início e o fim por arrasto.
+  Para percorrer o vídeo, arrasta o marcador amarelo ou arrasta em qualquer ponto da régua de tempo.
+  Para recuperar um trecho apagado, clica na zona riscada e escolhe «Repor trecho»; também está
+  disponível pelo botão direito. O menu do vídeo tem «Repor vídeo completo» para recuperar todos
+  os trechos e os cortes de início/fim. Podes desfazer estas reposições com Ctrl+Z.
+- ELEMENTOS: «+ Adicionar elemento» mostra Texto e Ficheiro. «Ficheiro» abre os ficheiros guardados,
+  com os mais recentes primeiro; «Carregar ficheiro» aceita imagens, GIFs e vídeos (MOV, MP4,
+  M4V, MKV e WebM). Clica numa miniatura para adicionar o ficheiro por cima do vídeo.
+  O × no canto de cada miniatura apaga o ficheiro da biblioteca. Se estiver em uso, remove-o
+  primeiro dos elementos do vídeo ou dos templates que o usam.
+  GIFs mantêm a animação e a transparência. Vídeos são convertidos para H.264 quando necessário.
+  GIFs e vídeos começam no início do elemento e repetem, sem som, até ao fim do seu intervalo,
+  tanto no visor como na exportação. Podes usar o mesmo ficheiro em vários elementos com tempos diferentes.
+  Os ficheiros e as posições ficam guardados na sessão e nos templates.
+  Texto e ficheiro duram o vídeo inteiro por omissão, independentemente do cursor. No visor: clica para selecionar, arrasta para
+  mover, puxa os cantos da moldura para escalar mantendo as proporções e usa ↻ para rodar
+  (Shift = passos de 15°). A barra junto da seleção permite duplicar, apagar e trazer para a frente/trás;
+  se a imagem estiver perto do topo, a barra aparece por baixo dela.
+  Na timeline, os elementos aparecem por ordem de camada por cima da faixa do vídeo: arrasta o bloco para mudar o
+  instante, ou as pontas para ajustar início/fim (também podes prolongar o início para a esquerda). As alças
+  continuam acessíveis mesmo em elementos muito curtos. O encaixe ajuda a alinhar tempos; Alt desliga-o.
+  Clicar numa faixa seleciona o elemento e, se necessário, salta para o início dele.
+  Botão direito numa faixa de texto/imagem abre «Duplicar» e «Apagar». Na lista à direita,
+  cada elemento ocupa uma linha para o selecionares. A caixa de texto aparece logo;
+  a seta «Estilo e posição» expande os ajustes menos frequentes. O último estilo continua a
+  ser usado nos novos textos. O botão «ⓘ Ajuda» junto à exportação abre as instruções e atalhos.
+  A lateral está dividida em três cards: Cena / modo (formatos e enquadramento),
+  Elementos e Exportação.
+- TEXTOS (qualquer formato): «Adicionar elemento» → «Texto» (ou T) põe um texto no resultado já pronto a escrever.
+  No resultado: arrasta para mover (encaixa no centro, nos terços e na divisão câmara/jogo; Alt
+  desliga o encaixe), roda do rato = tamanho, duplo clique = editar. No painel: cor, estilo
+  (Contorno / Caixa / Simples), tamanho, alinhamento do texto, letra e botões rápidos de posição
+  (↔ centrar, ↕ centrar, Cima, Divisão, Baixo). Enter = nova linha; linhas compridas partem sozinhas.
+  O próximo texto usa o último estilo. «Manter nos próximos clips» deixa esse texto fixo.
+- TEMPLATES (barra de cima): «Guardar novo» abre um diálogo para criar um template com TUDO o que está montado (formato, câmara/jogo, altura,
+  imagem/vídeo e o tamanho/posição, moldura Vertical, textos e imagens livres com rotação e duração).
+  Escolhe-o na lista para aplicar; os tempos dos elementos mantêm a distância ao fim do clip, adaptando-se à duração
+  do novo vídeo;
+  o último escolhido é aplicado sozinho quando abres o editor. «Atualizar» guarda diretamente
+  as alterações no template selecionado, mantendo o nome. «Guardar novo» cria outro template
+  e pede um nome diferente; nunca substitui um existente. O seletor adapta a largura ao nome.
+  «Gerir» abre a lista: podes aplicar, editar o nome e carregar em Renomear, duplicar ou
+  apagar cada template. Apagar pede confirmação na própria linha.
+- Barra de tempo: arrasta as pegas brancas para cortar início e fim. Clica numa faixa para selecionar
+  o segmento; Ctrl+B divide-o no cursor e Delete remove-o. A exportação junta os segmentos restantes,
+  sem intervalos vazios, e mantém o áudio sincronizado.
+- Formatos (1080x1920):
+  · Streamer (abre por omissão na primeira vez; depois abre no último formato usado) — câmara em cima; arrasta a divisão diretamente no resultado. Em baixo escolhes:
+      - Jogo: a parte do clip que vai para baixo (caixa azul no original).
+      - Imagem / vídeo: escolhe uma miniatura da Biblioteca e arrasta/roda o rato no resultado, ou
+        usa "Tamanho". "Encher" ocupa a zona toda, "Inteiro" mostra-o sem cortar, "Centrar" volta
+        ao meio. Vídeos repetem em loop, sem som.
+    No resultado, arrasta a barra verde da divisão para ajustar a altura da câmara. Duplo clique
+    alterna entre 40% e 50%; com a barra focada, ↑/↓ ajustam 1% (Shift = 5%). Clica na zona de baixo para ver
+    a moldura azul: arrasta o conteúdo para mover, puxa os cantos para ajustar o zoom. A moldura
+    indica a área de enquadramento; os cantos alteram o tamanho do conteúdo dentro dessa área.
+    Selecionar um texto/imagem livre esconde estes controlos para mostrar só os do elemento.
+    A posição da câmara fica lembrada POR CANAL: no próximo clip do mesmo streamer já vem enquadrada
+    (aparece "câmara deste canal" em baixo). Num canal novo usa a última que usaste.
+    Biblioteca: o "+" adiciona vídeos/imagens que ficam guardados na extensão para as próximas vezes
+    (imagens, GIFs e vídeos; converte para MP4 H.264 quando necessário).
+  · Vertical — moldura 9:16. Para a moldura se mover durante o clip: vai a outro instante e arrasta
+    outra vez; cada sítio fica marcado (◆ na barra) e a moldura desliza suavemente entre eles.
+    Os ◆ arrastam-se na barra para mudar o instante (não passam por cima dos vizinhos); clique =
+    ir para lá; botão direito (ou duplo clique) = apagar.
+  · Desfocado — vídeo ao centro com o fundo desfocado. Em «Zoom do vídeo», usa o controlo
+    ou os botões − / + para aproximar até 400%. Também podes usar a roda do rato sobre o vídeo
+    no resultado e arrastar para enquadrar. «Repor enquadramento» volta a 100% e centra o vídeo.
+    O zoom é aplicado à exportação, sem ampliar os textos ou as imagens livres. Pode ser desfeito
+    com Ctrl+Z e fica guardado na sessão e nos templates.
+  · Original — mantém o formato da fonte, com os mesmos controlos de zoom e enquadramento.
+- PUBLICAR NO TIKTOK: «Exportar + TikTok» (ou Shift+E). O vídeo começa logo a ser gerado e abre
+  um diálogo para preencheres, enquanto esperas:
+    · Descrição (legenda + #hashtags): começa vazia em cada clip e não faz parte dos templates.
+      «Aplicar última» recupera a última descrição confirmada para o TikTok, só quando quiseres.
+    · Quando: «Publicar já» ou «Agendar» com dia e hora (atalhos: +1 hora, Hoje/Amanhã 12:00 e
+      18:00). Lembra-se da última hora. O TikTok só aceita de 15 minutos a 10 dias à frente.
+  «Abrir no TikTok» (ou Ctrl+Enter) abre o TikTok Studio (precisas de sessão iniciada neste
+  browser). Quando o vídeo fica pronto a extensão põe lá o vídeo, a descrição e — se agendaste —
+  escolhe «Agendar», o dia e a hora. Tu só confirmas e carregas no botão final (a extensão nunca
+  publica sozinha). «Cancelar» no diálogo = só guarda o MP4 (depois de o diálogo fechar).
+  Com o TikTok o vídeo NÃO é descarregado para o PC (vai direto); se o quiseres também, carrega
+  em «💾 Guardar cópia no PC» no editor. Se aparecer a janela do Windows «Guardar como» nos
+  downloads normais, é a opção do browser «Perguntar onde guardar cada ficheiro» (Definições →
+  Transferências); desliga-a para guardar direto em Transferências/StreamClips.
+  Um cartão no canto mostra cada passo (✓/✕). Se algum falhar (o TikTok muda a página de vez em
+  quando), diz o que fazer à mão: arrastar o ficheiro, colar a legenda ou pôr a data/hora indicada.
+  Não feches o editor até o vídeo aparecer no TikTok (é de lá que ele vem).
+- "Exportar" (ou E) só guarda em Transferências/StreamClips com _tiktok no nome. Usa a placa gráfica:
+  normalmente 1-3 segundos para um clip de 30s.
+- Se a exportação encravar, acaba sozinha ao fim de uns segundos (ou mostra o erro) e os botões
+  voltam: é só exportar outra vez. Durante a exportação há «✕ Cancelar».
+- Refresh / fechar sem querer: o editor volta a abrir o último clip com o corte, as posições ◆ e
+  os textos e imagens livres como estavam, incluindo posição, tamanho, rotação e duração
+  («edição recuperada» em baixo).
+- Também dá para abrir qualquer clip antigo: «Abrir clip…» ou arrastar o ficheiro para o editor.
+
+NOTAS
+- Os clips chegam ao editor em MP4 (H.264 + AAC). Se a captura usar outro formato,
+  a extensão converte-o automaticamente; esta preparação pode demorar mais tempo.
+- A reserva só conta segmentos com dados recebidos. Se a captura deixar de produzir dados,
+  a extensão tenta reiniciá-la e usar outro codificador. Uma reserva de 0s não contém vídeo anterior.
+- Procurar outra posição no vídeo reinicia a reserva, para não juntar imagens de instantes diferentes.
+  Se a descarga falhar logo após o seek, o clip pode ser parcial enquanto o buffer volta a encher.
+- Se a descarga falhar, usa o trecho que estava em reserva no instante do clique.
+  Clips mais curtos são identificados como parciais; se o buffer estiver vazio, tenta recuperar
+  um trecho novo e avisa que foi capturado depois do clique.
+- O buffer adapta o bitrate à resolução e aos FPS do vídeo; os segmentos de 8s reduzem reinícios
+  do codificador. O clip pode ter até ~8s a mais do que o escolhido.
+- Na 1ª vez que fazes um clip numa aba, demora uns segundos a carregar o motor de vídeo (ffmpeg.wasm).
+- O som é gravado do próprio vídeo: se o player estiver em mute, o clip fica sem som.
+- Mudar de qualidade/vídeo ou procurar outra posição reinicia o buffer.
+
+MODO LIVE
+- O clip começa sempre num keyframe, por isso pode ter uns segundos a mais no início
+  (até ~5s no YouTube, até ~2s na Twitch).
+- YouTube: funciona em lives, mesmo que tenhas andado para trás na barra de tempo (até 12h).
+  Em vídeos normais tenta descarregar apenas os fragmentos do trecho escolhido. Se o YouTube
+  bloquear o pedido, usa a gravação: guarda os segundos que já viste e que estão em reserva.
+- Twitch: usa o VOD da live em curso, que a Twitch grava com uns segundos de atraso — por vezes
+  o clip espera ~5-10s até o final estar disponível. Canais sem VODs (ou VODs só para subs)
+  usam a gravação do ecrã.
+- Kick: usa os segmentos HLS recentes expostos pela live. Se não houver segmentos suficientes
+  ou a playlist não puder ser lida, usa a gravação do ecrã.
+- Se uma plataforma mudar algo e o modo live falhar, o painel diz e usa a gravação.
+
+ATUALIZAR ESTA VERSÃO
+- Em chrome://extensions (ou edge://extensions), carrega em Recarregar no Stream Clipper.
+- Atualiza também as páginas do YouTube/Twitch/Kick já abertas para carregarem os novos scripts.

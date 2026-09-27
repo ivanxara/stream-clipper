@@ -1,0 +1,51 @@
+#sc-panel {
+  position: fixed; right: 12px; bottom: 12px; z-index: 2147483647;
+  font: 500 11px/1.25 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: #f4f4f5; background: rgba(20, 20, 24, .92);
+  border: 1px solid rgba(255, 255, 255, .12); border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .4); min-width: 310px; user-select: none;
+  backdrop-filter: blur(6px);
+}
+#sc-panel * { box-sizing: border-box; font: inherit; }
+#sc-panel .sc-head { display: flex; align-items: center; gap: 4px; padding: 4px 6px; cursor: move; }
+#sc-panel .sc-title { flex: 1; font-weight: 700; letter-spacing: .02em; }
+#sc-panel .sc-dot { width: 7px; height: 7px; border-radius: 50%; background: #71717a; }
+#sc-panel.sc-rec .sc-dot { background: #ef4444; animation: sc-pulse 1.4s infinite; }
+#sc-panel.sc-live .sc-dot { background: #22c55e; animation: sc-pulse 1.4s infinite; }
+#sc-panel.sc-busy .sc-dot { background: #f59e0b; }
+@keyframes sc-pulse { 50% { opacity: .35; } }
+#sc-panel button {
+  all: unset; cursor: pointer; border-radius: 5px; text-align: center;
+  background: rgba(255, 255, 255, .08); color: #f4f4f5; padding: 2px 5px;
+}
+#sc-panel button:hover:not(:disabled) { background: rgba(255, 255, 255, .18); }
+#sc-panel button:disabled { opacity: .4; cursor: default; }
+#sc-panel button[hidden] { display: none; }
+#sc-panel .sc-toggle { font-size: 10px; font-weight: 700; }
+#sc-panel .sc-edit { background: #9146ff; font-weight: 700; }
+#sc-panel .sc-edit:hover { background: #a970ff; }
+#sc-panel .sc-body { padding: 0 6px 5px; }
+#sc-panel .sc-row { display: flex; gap: 4px; }
+#sc-panel .sc-recs { display: flex; gap: 3px; }
+#sc-panel .sc-btns { flex: 1; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3px; }
+#sc-panel .sc-duration { display: flex; min-width: 0; }
+#sc-panel .sc-rec-btn { display: flex; align-items: center; gap: 4px; padding: 5px 6px; font-weight: 700; background: rgba(239, 68, 68, .18); color: #fecaca; font-variant-numeric: tabular-nums; }
+#sc-panel .sc-rec-btn:hover:not(:disabled) { background: rgba(239, 68, 68, .32); }
+#sc-panel .sc-rdot { width: 9px; height: 9px; border-radius: 50%; background: #ef4444; }
+#sc-panel .sc-rsq { width: 9px; height: 9px; border-radius: 2px; background: #fff; }
+#sc-panel.sc-manual .sc-rec-btn { background: #dc2626; color: #fff; min-width: 58px; }
+#sc-panel.sc-manual .sc-rec-btn:hover { background: #ef4444; }
+#sc-panel.sc-manual .sc-rsq { animation: sc-pulse 1.4s infinite; }
+#sc-panel.sc-manual-paused .sc-rec-btn { background: #7f1d1d; }
+#sc-panel.sc-manual-paused .sc-rsq { animation: none; }
+#sc-panel .sc-pause { padding: 5px 6px; font-weight: 700; font-size: 10px; }
+#sc-panel.sc-manual .sc-dot { background: #ef4444; animation: sc-pulse .8s infinite; }
+#sc-panel .sc-clip { flex: 1; padding: 5px 0; min-width: 0; font-size: 10px; font-weight: 700; background: #9146ff; border-radius: 5px 0 0 5px; }
+#sc-panel .sc-clip:hover:not(:disabled) { background: #a970ff; }
+#sc-panel .sc-clip.sc-partial { background: rgba(145, 70, 255, .45); }
+#sc-panel .sc-continue { width: 15px; padding: 5px 0; font-size: 10px; font-weight: 700; background: #27272a; border-left: 1px solid rgba(255, 255, 255, .16); border-radius: 0 5px 5px 0; }
+#sc-panel .sc-continue:hover:not(:disabled) { background: #3f3f46; }
+#sc-panel .sc-continue.sc-partial { color: #a1a1aa; }
+#sc-panel .sc-status { margin-top: 4px; color: #a1a1aa; font-size: 10px; max-width: 270px; word-break: break-word; }
+#sc-panel.sc-collapsed .sc-body { display: none; }
+#sc-panel.sc-collapsed { min-width: 0; }

@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clip Editor</title>
+  <link rel="stylesheet" href="editor.css">
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="dot"></span> Stream Clipper</div>
+    <div class="tpl" title="Templates: guardam formato, câmara/jogo, imagem, posições e textos">
+      <select id="tplSel" aria-label="Template selecionado"><option value="">— Template —</option></select>
+      <button id="tplUpdate" class="btn small" title="Guardar as alterações no template selecionado" disabled>Atualizar</button>
+      <button id="tplSave" class="btn small" title="Guardar a edição como um novo template">Guardar novo</button>
+      <button id="tplManage" class="btn small" title="Renomear, duplicar ou apagar templates">Gerir</button>
+    </div>
+    <div class="file"><span id="fileName" class="muted">Nenhum clip</span></div>
+    <label class="btn ghost small">Abrir clip…<input id="fileInput" type="file" accept="video/mp4,video/webm" hidden></label>
+  </header>
+
+  <main>
+    <div id="stage" class="stage">
+      <video id="src" playsinline preload="auto"></video>
+      <div id="overlay"></div>
+      <div id="drop" class="drop">Arrasta um clip para aqui ou usa «Abrir clip…»</div>
+    </div>
+
+    <div id="resultBox" class="resultBox">
+      <canvas id="preview"></canvas>
+      <div id="splitBottomFrame" class="splitBottomFrame" hidden>
+        <span class="splitZoneLabel">Enquadramento</span>
+        <button class="splitZoom nw" data-corner="nw" aria-label="Zoom da zona inferior pelo canto superior esquerdo"></button>
+        <button class="splitZoom ne" data-corner="ne" aria-label="Zoom da zona inferior pelo canto superior direito"></button>
+        <button class="splitZoom sw" data-corner="sw" aria-label="Zoom da zona inferior pelo canto inferior esquerdo"></button>
+        <button class="splitZoom se" data-corner="se" aria-label="Zoom da zona inferior pelo canto inferior direito"></button>
+      </div>
+      <button id="splitDivider" class="splitDivider" role="slider" aria-label="Altura da câmara" aria-valuemin="20" aria-valuemax="50" aria-valuenow="35" aria-orientation="vertical" title="Arrasta para ajustar a altura da câmara · duplo clique alterna 40% / 50%" hidden><span>↕ <b id="splitDividerValue">35%</b></span></button>
+      <div id="elementGuideX" class="elementGuide vertical" hidden></div>
+      <div id="elementGuideY" class="elementGuide horizontal" hidden></div>
+      <div id="elementFrame" class="elementFrame" hidden>
+        <button class="elementGrip nw" data-handle="nw" aria-label="Redimensionar pelo canto superior esquerdo"></button>
+        <button class="elementGrip ne" data-handle="ne" aria-label="Redimensionar pelo canto superior direito"></button>
+        <button class="elementGrip sw" data-handle="sw" aria-label="Redimensionar pelo canto inferior esquerdo"></button>
+        <button class="elementGrip se" data-handle="se" aria-label="Redimensionar pelo canto inferior direito"></button>
+        <button class="elementRotate" data-handle="rotate" aria-label="Rodar elemento" title="Rodar · Shift = passos de 15°">↻</button>
+      </div>
+      <div id="elementToolbar" class="elementToolbar" hidden>
+        <button data-action="duplicate" title="Duplicar (Ctrl+D)">Duplicar</button>
+        <button data-action="front" aria-label="Trazer para a frente" title="Trazer para a frente">↑</button>
+        <button data-action="back" aria-label="Enviar para trás" title="Enviar para trás">↓</button>
+        <button data-action="delete" title="Apagar (Delete)">Apagar</button>
+      </div>
+    </div>
+
+    <div class="bottom">
+      <div class="transport">
+        <button id="play" class="btn icon" title="Play/pausa (espaço)">▶</button>
+        <span id="time" class="mono">0:00.0</span>
+        <span class="muted">·</span>
+        <span id="selInfo" class="mono muted">—</span>
+        <div class="historyTools" role="group" aria-label="Histórico de edições">
+          <button id="elementUndo" class="btn small" title="Desfazer última edição (Ctrl+Z)" aria-label="Desfazer última edição" disabled>↶</button>
+          <button id="elementRedo" class="btn small" title="Refazer última edição (Ctrl+Shift+Z)" aria-label="Refazer última edição" disabled>↷</button>
+        </div>
+        <div class="editTools" role="group" aria-label="Ferramentas de corte">
+          <button id="setIn" class="btn toolIcon" aria-label="Marcar início (I)" title="Marcar início (I)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3v18M19 7l-6 5 6 5M13 12H5"/></svg><span>In&#237;cio</span></button>
+          <button id="setOut" class="btn toolIcon" aria-label="Marcar fim (O)" title="Marcar fim (O)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 6 5-6 5m0-5h14M19 3v18"/></svg><span>Fim</span></button>
+          <button id="splitClip" class="btn toolIcon" aria-label="Dividir segmento (Ctrl+B)" title="Dividir segmento (Ctrl+B)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="m8 6.5 12 12M8 17.5l5.5-5.5M17 7l3-3M13.5 12H21"/></svg><span>Dividir</span></button>
+          <button id="deleteSegment" class="btn toolIcon danger" aria-label="Apagar trecho selecionado (Delete)" title="Apagar trecho selecionado (Delete)" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/></svg><span>Apagar trecho</span></button>
+          <button id="rippleDelete" class="btn toolIcon danger" aria-label="Apagar segmento e fechar espaço (Shift+Delete)" title="Apagar segmento e fechar espaço (Shift+Delete)" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h7m4 0h7M7 4l3 3-3 3m10-6-3 3 3 3M4 17h16M8 14l-4 3 4 3m8-6 4 3-4 3"/></svg><span>Fechar espaço</span></button>
+        </div>
+        <span class="spacer"></span>
+      </div>
+      <div class="tracksWrap">
+        <div id="elementRuler" class="elementRuler" title="Clica ou arrasta para percorrer o vídeo"></div>
+        <div id="elementTracks"></div>
+        <div class="videoTrackRow"><span class="trackLabel">&#9654; V&#237;deo</span>
+          <div id="timeline" class="timeline">
+            <div class="track"></div>
+            <div id="ranges" class="ranges"></div>
+            <div id="sel" class="sel" hidden></div>
+            <div id="hIn" class="handle in" title="Arrasta para mudar o início"></div>
+            <div id="hOut" class="handle out" title="Arrasta para mudar o fim"></div>
+            <div id="keys"></div>
+            <div id="head" class="playhead"></div>
+          </div>
+        </div>
+        <div class="tracksHeadWrap"><div id="tracksHead"><button id="scrubHandle" class="scrubHandle" type="button" role="slider" aria-label="Posição no vídeo" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0:00.0" title="Arrasta para percorrer o vídeo"></button></div></div>
+      </div>
+    </div>
+
+    <aside class="right">
+      <p id="hint" class="hint" hidden></p>
+      <section class="sideCard sceneCard optsWrap" aria-label="Cena e modo"><h2 class="cardTitle">Cena / modo</h2>    <nav id="layouts" class="layouts">
+      <button data-l="streamer" class="layout" aria-label="Streamer" title="Streamer — câmara em cima, jogo/imagem em baixo (1)"><svg viewBox="0 0 28 32" aria-hidden="true"><rect x="4" y="1" width="20" height="30" rx="3"/><path d="M4 13h20"/><circle class="camPart" cx="14" cy="6" r="2"/><path class="camPart" d="M10 11c0-4 8-4 8 0"/><path class="gamePart" d="M9 21h4m-2-2v4m7-3h.1m-2 3h.1"/></svg></button>
+      <button data-l="crop" class="layout" aria-label="Vertical" title="Vertical — moldura 9:16 móvel (2)"><svg viewBox="0 0 28 32" aria-hidden="true"><rect x="6" y="1" width="16" height="30" rx="3"/><path d="M10 7h8M10 25h8M1 16h9m-3-3 3 3-3 3m20-3h-9m3-3-3 3 3 3"/></svg></button>
+      <button data-l="blur" class="layout" aria-label="Desfocado" title="Desfocado — vídeo inteiro sobre fundo desfocado (3)"><svg viewBox="0 0 28 32" aria-hidden="true"><rect class="blurPart" x="4" y="1" width="20" height="30" rx="3"/><path class="blurLines" d="M8 5h12M8 8h12M8 24h12M8 27h12"/><rect class="sharpPart" x="4" y="11" width="20" height="10" rx="1"/><path d="m8 18 4-4 3 3 3-2 3 3"/></svg></button>
+      <button data-l="original" class="layout" aria-label="Original" title="Original — mantém o formato do vídeo (4)"><svg viewBox="0 0 28 32" aria-hidden="true"><rect x="1" y="7" width="26" height="18" rx="3"/><path d="m11 12 7 4-7 4z"/></svg></button>
+    </nav>
+
+<div id="opts"></div></section>
+      <section class="sideCard elementsCard optsWrap" aria-label="Elementos"><div id="textOpts"></div></section>
+      <div class="sideCard exportBar">
+        <div class="expRow">
+          <button id="export" class="btn" disabled title="Só guardar o MP4 (E)">Exportar <kbd>E</kbd></button>
+          <button id="exportTT" class="btn primary tt" disabled title="Guardar e abrir no TikTok Studio com o vídeo e a legenda já postos (Shift+E)">Exportar + TikTok <kbd>⇧E</kbd></button>
+        </div>
+        <div class="progRow"><div id="progress" class="progress" hidden><div></div></div>
+          <button id="cancelExp" class="btn small danger" hidden title="Parar a exportação">✕ Cancelar</button></div>
+        <p id="status" class="status muted"></p>
+        <button id="saveCopy" class="btn small" hidden title="O vídeo foi só para o TikTok; isto guarda-o também em Transferências/StreamClips">💾 Guardar cópia no PC</button>
+        <button id="editorHelp" class="btn small helpButton" aria-label="Ajuda e atalhos" title="Ajuda e atalhos">ⓘ <span>Ajuda</span></button>
+      </div>
+    </aside>
+  </main>
+
+  <div id="elementContextMenu" class="elementContextMenu" role="menu" aria-label="Ações do elemento" hidden>
+    <button role="menuitem" data-context-action="duplicate">Duplicar <kbd>Ctrl D</kbd></button>
+    <button role="menuitem" data-context-action="delete">Apagar <kbd>Del</kbd></button>
+  </div>
+  <div id="videoContextMenu" class="elementContextMenu" role="menu" aria-label="Ações do vídeo" hidden>
+    <button role="menuitem" data-video-action="split">Dividir aqui <kbd>Ctrl B</kbd></button>
+    <button role="menuitem" data-video-action="delete">Apagar trecho <kbd>Del</kbd></button>
+    <button role="menuitem" data-video-action="rippleDelete">Apagar e fechar espaço <kbd>Shift Del</kbd></button>
+    <button role="menuitem" data-video-action="restore">Repor trecho</button>
+    <button role="menuitem" data-video-action="restoreAll">Repor vídeo completo</button>
+  </div>
+  <dialog id="templatesDlg" class="ttDlg templatesDlg" aria-labelledby="templatesTitle">
+    <div class="templatesBody">
+      <div class="hrow"><b id="templatesTitle">Templates</b><button id="templatesClose" class="btn small" aria-label="Fechar templates">✕</button></div>
+      <form id="templateSaveForm" class="templateSaveForm">
+        <label for="templateName">Guardar como novo template</label>
+        <div class="row"><input id="templateName" maxlength="80" placeholder="Nome do novo template" required><button class="btn small" type="submit">Criar template</button></div>
+        <p class="muted small">Para guardar alterações no template selecionado, usa «Atualizar» na barra de cima.</p>
+      </form>
+      <p id="templateMessage" class="muted small" role="status"></p>
+      <div id="templateList" class="templateList"></div>
+    </div>
+  </dialog>
+  <dialog id="helpDlg" class="ttDlg helpDlg" aria-labelledby="helpTitle">
+    <form method="dialog">
+      <div class="hrow"><b id="helpTitle">Ajuda e atalhos</b><button class="btn small" aria-label="Fechar ajuda" autofocus>✕</button></div>
+      <p>Seleciona um elemento no visor ou na timeline. Arrasta para mover, usa os cantos para redimensionar e a pega ↻ para rodar.</p>
+      <p>Em «Adicionar elemento» → «Ficheiro», carrega imagens, GIFs ou vídeos MOV/MP4 e clica numa miniatura para adicionar ao visor. GIFs e vídeos repetem sem som durante o intervalo do elemento; a animação também fica na exportação.</p>
+      <p>Na timeline, arrasta o marcador amarelo ou a régua de tempo para percorrer o vídeo. Com um elemento selecionado, Início/Fim e Dividir atuam nesse elemento; sem seleção, atuam no vídeo. Usa «Apagar trecho» para deixar um espaço vazio ou «Fechar espaço» para remover o segmento e deslocar o que vem depois. O marcador ↶ repõe qualquer corte; no menu do vídeo podes repor o vídeo completo.</p>
+      <p>No Streamer, arrasta a divisão verde para ajustar a altura da câmara. Clica na zona de baixo para mover o conteúdo e ajustar o zoom pelos cantos da moldura azul.</p>
+      <p>No Desfocado e Original, usa «Zoom do vídeo», os botões − / + ou a roda do rato sobre o vídeo para aproximar até 400%. Arrasta para enquadrar e usa «Repor enquadramento» para voltar ao início. O zoom fica no vídeo exportado.</p>
+      <dl class="shortcutList">
+        <dt>Play / pausa</dt><dd><kbd>Espaço</kbd> / <kbd>K</kbd></dd>
+        <dt>Marcar início / fim</dt><dd><kbd>I</kbd> / <kbd>O</kbd></dd>
+        <dt>Dividir no cursor / apagar segmento</dt><dd><kbd>Ctrl+B</kbd> / <kbd>Delete</kbd></dd>
+        <dt>Apagar e fechar espaço</dt><dd><kbd>Shift+Delete</kbd></dd>
+        <dt>Mover seleção / avançar frame</dt><dd><kbd>←</kbd> <kbd>→</kbd></dd>
+        <dt>Adicionar texto</dt><dd><kbd>T</kbd></dd>
+        <dt>Apagar / duplicar</dt><dd><kbd>Del</kbd> / <kbd>Ctrl D</kbd></dd>
+        <dt>Desfazer / refazer edições</dt><dd><kbd>Ctrl Z</kbd> / <kbd>Ctrl ⇧Z</kbd></dd>
+        <dt>Exportar / enviar para TikTok</dt><dd><kbd>E</kbd> / <kbd>⇧E</kbd></dd>
+      </dl>
+    </form>
+  </dialog>
+
+  <dialog id="ttDlg" class="ttDlg">
+    <form method="dialog">
+      <div class="dh"><b>Publicar no TikTok</b><span id="ttProg" class="muted">A gerar o vídeo…</span></div>
+      <div class="fl">
+        <div class="hrow"><label for="ttCap">Descrição</label><button id="ttLastCaption" class="btn small" type="button" title="Recuperar a última descrição confirmada para o TikTok" disabled>Aplicar última</button></div>
+        <textarea id="ttCap" rows="4" maxlength="2200" placeholder="Legenda + #hashtags"></textarea>
+      </div>
+      <div class="fl">Quando
+        <div class="seg"><button type="button" data-when="now">Publicar já</button><button type="button" data-when="at">Agendar</button></div>
+      </div>
+      <div id="ttAt" class="ttAt">
+        <div class="row"><input id="ttDate" type="date"><input id="ttTime" type="time" step="300"></div>
+        <div class="row quick">
+          <button type="button" class="btn small" data-q="1h">+1 hora</button>
+          <button type="button" class="btn small" data-q="today12:00">Hoje 12:00</button>
+          <button type="button" class="btn small" data-q="today18:00">Hoje 18:00</button>
+          <button type="button" class="btn small" data-q="tom12:00">Amanhã 12:00</button>
+          <button type="button" class="btn small" data-q="tom18:00">Amanhã 18:00</button>
+        </div>
+        <p id="ttWhenTxt" class="whenTxt"></p>
+      </div>
+      <p id="ttErr" class="err"></p>
+      <div class="row end">
+        <button id="ttCancel" type="button" class="btn">Cancelar</button>
+        <button id="ttGo" class="btn primary tt" value="ok"><span class="lbl">Abrir no TikTok</span> <kbd>Ctrl+Enter</kbd></button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="editor.js"></script>
+</body>
+</html>
