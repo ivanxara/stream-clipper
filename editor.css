@@ -151,11 +151,6 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .opt { display: flex; flex-direction: column; gap: 8px; }
 .opt label { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
 .opt input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
-.keylist { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow: auto; }
-.keylist .k { display: flex; align-items: center; gap: 8px; padding: 4px 8px; background: #1d1d24; border-radius: 6px; }
-.keylist .k span { flex: 1; }
-.keylist .k button { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 14px; }
-.keylist .k button:hover { color: var(--danger); }
 
 .progress { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .progress div { height: 100%; width: 0; background: var(--accent); transition: width .1s linear; }
@@ -286,6 +281,10 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .seg.icons button { display: grid; place-items: center; padding: 4px; }
 .seg.icons svg { width: 16px; height: 16px; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; fill: none; }
 .tools select, .fontRow select { flex: 1; min-width: 0; background: #1d1d24; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; font: inherit; }
+/* combo de tamanho: escolhe uma sugestão (datalist) ou escreve um número, como no Word */
+.sizeCombo { flex: 1; min-width: 0; }
+.sizeCombo input { width: 100%; background: #1d1d24; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; font: inherit; }
+.sizeCombo input:focus { outline: none; border-color: var(--accent); }
 .row.pos .btn { flex: 1 1 auto; padding: 4px 6px; }
 .check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
 .elementList { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow-y: auto; }
@@ -295,6 +294,8 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .elementType { color: var(--accent-2); font-weight: 600; width: 16px; text-align: center; flex: none; }
 .elementType img { display: block; width: 16px; height: 16px; object-fit: contain; border-radius: 2px; }
 .elementName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.elementDelete { all: unset; flex: none; box-sizing: border-box; width: 30px; height: 100%; display: grid; place-items: center; color: var(--muted); cursor: pointer; border-left: 1px solid var(--line); border-radius: 0 6px 6px 0; }
+.elementDelete:hover, .elementDelete:focus-visible { color: #fca5a5; background: rgba(165, 44, 54, .3); }
 .elementOptions summary { cursor: pointer; padding: 6px 0; color: var(--muted); font-size: 12px; }
 .elementOptions[open] summary { margin-bottom: 6px; color: var(--text); }
 .helpButton { align-self: flex-end; color: var(--muted); }
@@ -336,9 +337,18 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .tracksWrap { position: relative; max-height: 172px; min-height: 0; overflow-y: auto; margin-top: 7px; padding-bottom: 2px; }
 .elementRuler { display: flex; justify-content: space-between; margin-left: 102px; height: 17px; font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .elementTrack { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 8px; margin-bottom: 2px; height: 23px; }
-.trackLabel { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: transparent; color: #b5b4c6; border: 0; text-align: left; padding: 5px 3px; font: inherit; font-size: 11px; cursor: pointer; }
+/* Fixa a coluna do nome (elemento/áudio/vídeo) ao fazer scroll horizontal na timeline, para se
+   ver sempre a que faixa corresponde cada bloco, mesmo a meio de uma timeline longa. */
+.trackLabel { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: var(--panel); color: #b5b4c6; border: 0; text-align: left; padding: 5px 3px; font: inherit; font-size: 11px; cursor: pointer; position: sticky; left: 0; z-index: 3; }
+/* Arrastar a etiqueta para cima/baixo troca a ordem das camadas (z-index), como num editor normal. */
+.elementTrack .trackLabel { cursor: grab; }
+.elementTrack.dragging { opacity: .4; }
+.elementTrack.dragOver .trackLabel { box-shadow: inset 0 2px 0 0 #e3c8ff; }
+.elementTrack.dragOverBottom .trackLabel { box-shadow: inset 0 -2px 0 0 #e3c8ff; }
 .trackLane { position: relative; background: #101015; border-radius: 4px; cursor: crosshair; }
-.elementBlock { position: absolute; height: 100%; border-radius: 4px; border: 1px solid #8656b3; background: #492d68; color: #eee5ff; min-width: 5px; overflow: visible; font-size: 11px; display: flex; align-items: center; }
+/* min-width >= a soma das duas pegas (20px cada, viradas 17px para dentro) — o mesmo problema
+   que havia no áudio: um elemento com pouca duração ficava com as pegas a cobrir o bloco todo. */
+.elementBlock { position: absolute; height: 100%; border-radius: 4px; border: 1px solid #8656b3; background: #492d68; color: #eee5ff; min-width: 44px; overflow: visible; font-size: 11px; display: flex; align-items: center; }
 .elementBlock { cursor: grab; touch-action: none; }
 .elementBlock.on { border: 2px solid #e3c8ff; box-shadow: 0 0 0 1px #9146ff; }
 .elementBlock.imageBlock { background: #234d59; border-color: #3b9bab; }
@@ -372,6 +382,10 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .timeline .range.active { background: linear-gradient(135deg, #674294, #43305f); box-shadow: inset 0 0 0 1px #e4cfff; border-color: #e4cfff; }
 .timeline .range.sequenceRange { background: linear-gradient(135deg, #245267, #213c54); border-color: #4ca5c9; }
 .timeline .range.sequenceRange.active { background: linear-gradient(135deg, #32708b, #29506e); border-color: #b9edff; box-shadow: inset 0 0 0 1px #b9edff; }
+/* Arrastar um segmento para reordenar a exportação: mostra de que lado vai entrar. */
+.timeline .range.dragging { opacity: .35; }
+.timeline .range.dragOverBefore { box-shadow: inset 3px 0 0 0 #fff; }
+.timeline .range.dragOverAfter { box-shadow: inset -3px 0 0 0 #fff; }
 .timeline .handle { top: 1px; height: 29px; width: 10px; margin-left: -5px; box-shadow: 0 1px 5px #0006; }
 .timeline .handle::after { content: ''; position: absolute; left: 4px; top: 9px; width: 2px; height: 10px; background: #625079; border-radius: 2px; }
 .timeline .playhead { display: none; }
@@ -397,7 +411,9 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .audioTrackRow { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 8px; height: 23px; margin-top: 2px; }
 .audioTrackRow .trackLabel { display: flex; align-items: center; gap: 4px; padding-block: 2px; color: #9ee6d4; }
 .audioLane { position: relative; min-width: 0; overflow: hidden; border-radius: 4px; background: #101715; }
-.audioBlock { position: absolute; top: 1px; bottom: 1px; min-width: 5px; display: flex; align-items: center; overflow: hidden; border: 1px solid #25866d; border-radius: 4px; background: linear-gradient(135deg, #174d42, #173b36); color: #d8fff5; cursor: grab; touch-action: none; }
+/* min-width >= a soma das duas pegas (16px cada, viradas 5px para dentro): sem isto, num áudio
+   curto as pegas cobrem o bloco todo e nunca sobra espaço para arrastar (só esticar as pontas). */
+.audioBlock { position: absolute; top: 1px; bottom: 1px; min-width: 40px; display: flex; align-items: center; overflow: hidden; border: 1px solid #25866d; border-radius: 4px; background: linear-gradient(135deg, #174d42, #173b36); color: #d8fff5; cursor: grab; touch-action: none; }
 .audioBlock.on { border-color: #a7f3d0; box-shadow: inset 0 0 0 1px #a7f3d0; }
 .audioBlock.muted { opacity: .5; }
 .audioWave { flex: 1; min-width: 0; padding: 0 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; background: repeating-linear-gradient(90deg, transparent 0 3px, #66d7ba40 3px 4px); }
@@ -433,13 +449,25 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .ttDlg .dh { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 15px; }
 .ttDlg .dh .muted { font-size: 12px; }
 .ttDlg .fl { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
-.ttDlg textarea, .ttDlg input[type=date], .ttDlg input[type=time] { background: #1d1d24; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; font-size: 13px; }
+.ttDlg textarea, .ttDlg input[type=date], .ttDlg input[type=time], .ttDlg input[type=text] { background: #1d1d24; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; font-size: 13px; }
 .ttDlg textarea { resize: vertical; min-height: 80px; }
 .ttDlg textarea:focus, .ttDlg input:focus { outline: none; border-color: var(--accent); }
-.ttDlg input[type=date], .ttDlg input[type=time] { flex: 1; color-scheme: dark; }
+.ttDlg input[type=date], .ttDlg input[type=time], .ttDlg input[type=text] { flex: 1; color-scheme: dark; }
+/* predefinições de legenda/hashtags: pares botão + apagar, para reutilizar sem escrever de novo */
+.capPresets:empty { display: none; }
+.capPreset { display: inline-flex; align-items: center; gap: 1px; }
+.capPreset .btn { border-radius: 6px 0 0 6px; }
+.capPresetDel { all: unset; cursor: pointer; color: var(--muted); padding: 5px 7px; font-size: 13px; line-height: 1; background: rgba(255, 255, 255, .06); border-radius: 0 6px 6px 0; }
+.capPresetDel:hover { color: #fca5a5; background: rgba(165, 44, 54, .35); }
+.capPresetSave { gap: 6px; }
+.capPresetSave input { min-width: 0; }
+.capPresetSave .btn { flex: none; }
 .ttAt { display: flex; flex-direction: column; gap: 8px; }
 .ttAt[hidden] { display: none; }
 .ttDlg .quick .btn { flex: 1 1 auto; }
+.ttLast { display: flex; flex-direction: column; gap: 6px; padding-top: 6px; border-top: 1px dashed var(--line); }
+.ttLast[hidden] { display: none; }
+.ttLast p { margin: 0; font-size: 12px; }
 .whenTxt { margin: 0; font-size: 12px; color: var(--accent-2); min-height: 1.2em; }
 .whenTxt:first-letter { text-transform: uppercase; }
 .ttDlg .err { margin: 0; color: #fca5a5; font-size: 12px; min-height: 0; }

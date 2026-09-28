@@ -183,6 +183,11 @@
       <div class="fl">
         <div class="hrow"><label for="ttCap">Descrição</label><button id="ttLastCaption" class="btn small" type="button" title="Recuperar a última descrição confirmada para o TikTok" disabled>Aplicar última</button></div>
         <textarea id="ttCap" rows="4" maxlength="2200" placeholder="Legenda + #hashtags"></textarea>
+        <div class="row quick capPresets" id="ttPresets"></div>
+        <div class="row capPresetSave">
+          <input id="ttPresetName" type="text" maxlength="40" placeholder="Nome do preset (ex.: Valorant)">
+          <button id="ttPresetSaveBtn" type="button" class="btn small" title="Guarda a descrição escrita acima como preset com este nome">+ Guardar preset</button>
+        </div>
       </div>
       <div class="fl">Quando
         <div class="seg"><button type="button" data-when="now">Publicar já</button><button type="button" data-when="at">Agendar</button></div>
@@ -190,11 +195,20 @@
       <div id="ttAt" class="ttAt">
         <div class="row"><input id="ttDate" type="date"><input id="ttTime" type="time" step="300"></div>
         <div class="row quick">
+          <button type="button" class="btn small" data-q="15m">+15 min</button>
+          <button type="button" class="btn small" data-q="30m">+30 min</button>
+          <button type="button" class="btn small" data-q="45m">+45 min</button>
           <button type="button" class="btn small" data-q="1h">+1 hora</button>
-          <button type="button" class="btn small" data-q="today12:00">Hoje 12:00</button>
-          <button type="button" class="btn small" data-q="today18:00">Hoje 18:00</button>
           <button type="button" class="btn small" data-q="tom12:00">Amanhã 12:00</button>
           <button type="button" class="btn small" data-q="tom18:00">Amanhã 18:00</button>
+        </div>
+        <div id="ttLastRow" class="ttLast" hidden>
+          <p id="ttLastTxt" class="muted"></p>
+          <div class="row quick">
+            <button type="button" class="btn small" data-ql="15m">+15 min</button>
+            <button type="button" class="btn small" data-ql="30m">+30 min</button>
+            <button type="button" class="btn small" data-ql="1h">+1 hora</button>
+          </div>
         </div>
         <p id="ttWhenTxt" class="whenTxt"></p>
       </div>

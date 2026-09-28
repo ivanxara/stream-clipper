@@ -62,6 +62,17 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
     st.images = st.images.filter(e => e.id !== st.textSel);
     st.textSel = null; commit(); renderPanel(); update(); onSelection?.();
   }
+  // Apagar diretamente na lista, sem ter de selecionar primeiro (botão ✕ de cada linha).
+  function removeById(id) {
+    if (st.busy || !all().some(e => e.id === id)) return;
+    const wasSelected = st.textSel === id;
+    commit();
+    st.texts = st.texts.filter(e => e.id !== id);
+    st.images = st.images.filter(e => e.id !== id);
+    if (wasSelected) st.textSel = null;
+    commit(); renderPanel(); update();
+    if (wasSelected) onSelection?.();
+  }
   function trimSelected(edge, time = video.currentTime) {
     const e = selected(); if (!e || st.busy) return false;
     const { start, end } = times(e), min = Math.min(.1, st.dur);
@@ -83,10 +94,19 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
     commit(); renderPanel(); renderTracks(); update(); buttons(); onSelection?.();
     return true;
   }
+  // A cópia fica logo a seguir à original na timeline (nunca em cima dela), como em qualquer
+  // editor de vídeo. Só sobrepõe no caso raro em que o elemento já ocupa o clip todo e não há
+  // espaço livre antes nem depois.
   function duplicate() {
     const e = selected(); if (!e || st.busy) return;
     commit();
-    const copy = { ...cleanElements([e])[0], id: crypto.randomUUID(), x: clamp(e.x + .035, 0, 1), y: clamp(e.y + .035, 0, 1), z: nextZ() };
+    const { start, end } = times(e), length = Math.max(.1, end - start), dur = st.dur;
+    let copyIn;
+    if (end + .05 < dur) copyIn = end;
+    else if (start - length > -.05) copyIn = Math.max(0, start - length);
+    else copyIn = start;
+    const copyOut = e.out != null ? Math.min(dur, copyIn + length) : null;
+    const copy = { ...cleanElements([e])[0], id: crypto.randomUUID(), in: copyIn, out: copyOut, x: clamp(e.x + .035, 0, 1), y: clamp(e.y + .035, 0, 1), z: nextZ() };
     (e.mediaId ? st.images : st.texts).push(copy); commit(); select(copy.id, true);
   }
   function addImage(id, props = {}) {
@@ -201,7 +221,7 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
     const pct = t => duration ? t / duration * 100 : 0;
     tracks.innerHTML = items.map(e => {
       const {start, end} = times(e), displayStart = toTimelineTime(start), displayEnd = toTimelineTime(end);
-      return `<div class="elementTrack"><button class="trackLabel" data-select="${esc(e.id)}" title="Selecionar ${esc(label(e))}">${e.mediaId ? '▧' : 'T'} ${esc(label(e))}</button><div class="trackLane"><div class="elementBlock ${e.mediaId ? 'imageBlock' : ''} ${e.id === st.textSel ? 'on' : ''}" data-element="${esc(e.id)}" style="left:${pct(displayStart)}%;width:${Math.max(0, pct(displayEnd - displayStart))}%" role="button" tabindex="0" aria-label="${esc(label(e))}: ${fmt(displayStart)} a ${fmt(displayEnd)}"><span class="timeGrip" data-edge="in" title="Ajustar início"></span><span class="blockName">${esc(label(e))}</span><span class="timeGrip end" data-edge="out" title="Ajustar fim"></span></div></div></div>`;
+      return `<div class="elementTrack" data-track="${esc(e.id)}"><button class="trackLabel" data-select="${esc(e.id)}" draggable="true" title="Selecionar ${esc(label(e))} · arrasta para reordenar as camadas">${e.mediaId ? '▧' : 'T'} ${esc(label(e))}</button><div class="trackLane"><div class="elementBlock ${e.mediaId ? 'imageBlock' : ''} ${e.id === st.textSel ? 'on' : ''}" data-element="${esc(e.id)}" style="left:${pct(displayStart)}%;width:${Math.max(0, pct(displayEnd - displayStart))}%" role="button" tabindex="0" aria-label="${esc(label(e))}: ${fmt(displayStart)} a ${fmt(displayEnd)}"><span class="timeGrip" data-edge="in" title="Ajustar início"></span><span class="blockName">${esc(label(e))}</span><span class="timeGrip end" data-edge="out" title="Ajustar fim"></span></div></div></div>`;
     }).join('');
     buttons();
   }
@@ -230,7 +250,12 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
         start = clamp(start, 0, duration - displayLength);
         e.in = fromTimelineTime(start); e.out = fromTimelineTime(start + displayLength);
       }
-      block.style.left = `${e.in / st.dur * 100}%`; block.style.width = `${(e.out - e.in) / st.dur * 100}%`;
+      // Tem de usar toTimelineTime (posição na régua), não e.in/st.dur (tempo da fonte): divergem
+      // sempre que a régua não é 1:1 com a fonte (segmentos cortados/reordenados) — dava para ver
+      // o bloco "teleportar-se" a meio do arrasto, porque isto ficava com a escala errada.
+      const editIn = toTimelineTime(e.in), editOut = toTimelineTime(e.out);
+      block.style.left = `${duration ? editIn / duration * 100 : 0}%`;
+      block.style.width = `${duration ? Math.max(0, editOut - editIn) / duration * 100 : 0}%`;
       video.currentTime = edge === 'out' ? Math.max(e.in, e.out - .025) : e.in;
     };
     const end = event => {
@@ -250,6 +275,54 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
     }
   });
   tracks.addEventListener('keydown', ev => { if (ev.key === 'Enter' && ev.target.dataset.element) { ev.preventDefault(); select(ev.target.dataset.element, true); } });
+
+  // Arrastar a etiqueta verticalmente troca a ordem das camadas (z), como num editor normal.
+  // Usa o drag-and-drop nativo (não o pointer capture do trackDrag): assim nunca se chama
+  // renderTracks() a meio do arrasto (isso cancelaria o drag nativo, ou pior, deixava-o preso
+  // a um nó já destacado — o mesmo problema que houve no arrastar do áudio).
+  function reorderElement(draggedId, targetId, before) {
+    if (st.busy || draggedId === targetId) return;
+    const item = all().find(x => x.id === draggedId);
+    if (!item) return;
+    commit();
+    const order = all().reverse();   // de cima para baixo, como é mostrado
+    order.splice(order.findIndex(x => x.id === draggedId), 1);
+    let to = order.findIndex(x => x.id === targetId);
+    if (to < 0) return;
+    if (!before) to++;
+    order.splice(to, 0, item);
+    order.forEach((x, i) => { x.z = order.length - i; });
+    commit(); renderPanel();
+  }
+  let draggingId = null;
+  const clearDragMarks = () => tracks.querySelectorAll('.elementTrack').forEach(r => r.classList.remove('dragging', 'dragOver', 'dragOverBottom'));
+  tracks.addEventListener('dragstart', ev => {
+    const row = ev.target.closest('.elementTrack');
+    if (!row || st.busy) { ev.preventDefault(); return; }
+    draggingId = row.dataset.track;
+    ev.dataTransfer.effectAllowed = 'move';
+    ev.dataTransfer.setData('text/plain', draggingId);   // o Firefox exige dados para o drag arrancar
+    row.classList.add('dragging');
+  });
+  tracks.addEventListener('dragover', ev => {
+    const row = ev.target.closest('.elementTrack');
+    if (!row || !draggingId || row.dataset.track === draggingId) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'move';
+    const r = row.getBoundingClientRect(), before = ev.clientY < r.top + r.height / 2;
+    tracks.querySelectorAll('.dragOver, .dragOverBottom').forEach(x => x.classList.remove('dragOver', 'dragOverBottom'));
+    row.classList.add(before ? 'dragOver' : 'dragOverBottom');
+  });
+  tracks.addEventListener('drop', ev => {
+    const row = ev.target.closest('.elementTrack');
+    if (row && draggingId && row.dataset.track !== draggingId) {
+      ev.preventDefault();
+      const r = row.getBoundingClientRect();
+      reorderElement(draggingId, row.dataset.track, ev.clientY < r.top + r.height / 2);
+    }
+    draggingId = null; clearDragMarks();
+  });
+  tracks.addEventListener('dragend', () => { draggingId = null; clearDragMarks(); });
   const contextMenu = $('#elementContextMenu');
   let contextId = null;
   function closeContext(restoreFocus = false) {
@@ -323,5 +396,5 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
     }
   }, true);
   reset();
-  return { selected, select, addImage, remove, duplicate, trimSelected, splitSelected, changed, commit, reset, update, renderTracks, nextZ, undo: history, refreshButtons: buttons };
+  return { selected, select, addImage, remove, removeById, duplicate, trimSelected, splitSelected, changed, commit, reset, update, renderTracks, nextZ, undo: history, refreshButtons: buttons };
 }

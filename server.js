@@ -205,10 +205,15 @@
       return { format, segments: indexedSegments(bytes, offset) };
     };
     const tracks = await Promise.all([prepare(f.video), prepare(f.audio)]);
-    // Inclui o fragmento anterior para disponibilizar um keyframe antes do corte.
+    // Inclui fragmentos anteriores suficientes para garantir uma imagem-chave antes do corte:
+    // um segmento nem sempre começa mesmo num keyframe, e sem margem o corte recuava menos do
+    // que o pedido (clip mais curto que os X segundos escolhidos).
     const first = tracks[0].segments.findIndex((s) => s.to > from);
     if (first < 0) throw new Unsupported('Esse trecho ainda não está disponível no vídeo.');
-    const downloadFrom = tracks[0].segments[Math.max(0, first - 1)].from;
+    const margin = Math.max(f.dur * 2, 10);
+    let lead = first;
+    while (lead > 0 && tracks[0].segments[lead].from > from - margin) lead--;
+    const downloadFrom = tracks[0].segments[lead].from;
     const selections = tracks.map(({ segments }) => segments.filter((s) => s.to > downloadFrom && s.from < to));
     if (selections.some((segments) => !segments.length || segments[segments.length - 1].to + 0.1 < to)) {
       throw new Unsupported('Esse trecho ainda não está disponível no vídeo.');
@@ -236,7 +241,8 @@
     const probe = new Uint8Array(await get(f.v + '&sq=' + guess));
     const t0 = fragmentStart(probe);
     const sqOf = (t) => (t0 == null ? Math.floor(t / f.dur) : guess + Math.floor((t - t0) / f.dur));
-    const sqEnd = sqOf(to), sqStart = Math.max(0, sqOf(from));
+    // Um segmento a mais antes de 'from': margem para o corte encontrar sempre um keyframe.
+    const sqEnd = sqOf(to), sqStart = Math.max(0, sqOf(from) - 1);
     const sqs = [];
     for (let s = sqStart; s <= sqEnd; s++) sqs.push(s);
 

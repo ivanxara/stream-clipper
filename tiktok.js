@@ -264,6 +264,13 @@
   }
 
   // ---------- fluxo ----------
+  // Nunca clicamos em Publicar/Agendar (é sempre o utilizador), por isso não há confirmação real
+  // do TikTok — isto só regista até onde a extensão conseguiu preencher sozinha, para servir de
+  // referência ao próximo clip (chega tão perto de "verificado" quanto dá sem tocar no botão final).
+  function recordFilled(when, name) {
+    try { chrome.storage.local.set({ scLastTikTok: { at: when, name, mode: schedule ? 'at' : 'now', recordedAt: Date.now() } }); } catch {}
+  }
+
   async function run(j) {
     running = true;
     const done = () => { try { chrome.storage.local.set({ scTikTok: { ...j, state: 'done', at: Date.now() } }); } catch {} };
@@ -315,6 +322,7 @@
         step('post', 'now');
         say(ok ? `Agendado para ${when}. Confere e carrega em «Agendar»/«Publicar».`
           : `Não consegui pôr a data/hora sozinho: escolhe «Agendar» e põe ${when}. Depois carrega em «Agendar».`);
+        if (ok) recordFilled(new Date(`${schedule.date}T${schedule.time}`).getTime(), file.name);
         if (!ok) { ensureCard().root.querySelector('.sched').hidden = false; const r = findSchedule(); if (r) { r.style.outline = '3px solid #fe2c55'; r.style.outlineOffset = '4px'; r.scrollIntoView({ block: 'center', behavior: 'smooth' }); } }
         return done();
       }
@@ -322,6 +330,7 @@
       // Sem agendamento = publicar já.
       step('post', 'now');
       say('Pronto! Confere e carrega em «Publicar».');
+      recordFilled(Date.now(), file.name);
       done();
     } catch (e) {
       console.warn('[StreamClipper TikTok]', e);

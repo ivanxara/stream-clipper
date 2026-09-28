@@ -194,15 +194,21 @@
     }
     state.stream = stream;
     state.lastDataAt = now();
+    // Só reinicia com saltos a sério (o utilizador procurou outra posição); os players fazem
+    // pequenos reajustes sozinhos (ex.: voltar ao direto depois de um stall) que não devem
+    // deitar fora minutos de buffer bom. A referência só avança fora de um seek, por isso o
+    // salto é sempre medido a partir da última posição estável.
+    let seekRef = video.currentTime;
+    const trackTime = () => { if (!video.seeking) seekRef = video.currentTime; };
     const videoSeeking = () => {
-      if (state.stream === stream && state.enabled) resetSegments(false);
+      if (state.stream !== stream || !state.enabled) return;
+      if (Math.abs(video.currentTime - seekRef) < 2) return;
+      seekRef = video.currentTime;
+      resetSegments();   // instantâneo: recomeça já, não espera pelo 'seeked'
     };
-    const videoSeeked = () => {
-      if (state.stream === stream && state.enabled) resetSegments();
-    };
+    video.addEventListener('timeupdate', trackTime);
     video.addEventListener('seeking', videoSeeking);
-    video.addEventListener('seeked', videoSeeked);
-    state.seekListeners = [[video, 'seeking', videoSeeking], [video, 'seeked', videoSeeked]];
+    state.seekListeners = [[video, 'timeupdate', trackTime], [video, 'seeking', videoSeeking]];
     // Se as faixas mudarem depois (troca de fonte), recomeça o buffer.
     let t;
     const restart = () => {
@@ -219,15 +225,15 @@
     render();
   }
 
-  // Descarta o buffer e recomeça a gravar no mesmo stream.
-  function resetSegments(restart = true) {
+  // Descarta o buffer e recomeça já a gravar no mesmo stream.
+  function resetSegments() {
     if (!state.stream) return;
     bufferGen++;
     clearInterval(state.timer);
     state.timer = null;
     for (const s of state.segments) if (s.rec && s.rec.state !== 'inactive') { try { s.rec.stop(); } catch {} }
     state.segments = [];
-    state.current = restart && state.stream.getVideoTracks().some((t) => t.readyState === 'live') ? startSegment() : null;
+    state.current = state.stream.getVideoTracks().some((t) => t.readyState === 'live') ? startSegment() : null;
     if (state.current) scheduleRotation();
     render();
   }
@@ -266,24 +272,39 @@
   const server = self.StreamClipperServer;
   const serverAvailable = () => !!server?.available();
 
-  async function clip(seconds) {
-    if (state.busy) return;
+  // Um clip a processar não impede o clique seguinte: cada clique agarra já a sua fatia do
+  // buffer (e abre já o editor, tem de ser no gesto) e fica em fila se outro ainda estiver a
+  // ser preparado. Só a gravação manual (● REC) continua a bloquear enquanto isso.
+  const clipQueue = [];
+
+  function clip(seconds) {
     const useServer = serverAvailable();
     if (!useServer && !state.stream) return toast('Nenhum vídeo a gravar ainda.');
-    state.busy = true;
-    render('A preparar clip de ' + seconds + 's…');
     // O editor abre já (o browser só deixa abrir abas no instante do clique/tecla) e recebe o clip
     // quando estiver pronto. Se a aba for bloqueada, o clip é guardado diretamente.
     const editor = openEditorTab('#pending');
+    const clickTime = now();
+    // Guarda as referências antes da descarga: o buffer pode rodar ou ser reiniciado entretanto.
+    const snapshot = state.segments.slice();
+    const snapshotGen = bufferGen;
+    // Fecha o segmento atual exatamente agora (fica como reserva); não se espera por isto
+    // antes do modo live, para a posição do player ser lida no instante do clique.
+    const rotated = state.stream ? rotate().then(scheduleRotation) : Promise.resolve();
+    rotated.catch(() => {});
+    const task = { seconds, useServer, editor, clickTime, snapshot, snapshotGen, rotated };
+    if (state.busy) {
+      clipQueue.push(task);
+      // O "· N em fila" no render() já mostra a posição; o toast só confirma o clique.
+      toast(`Clip de ${seconds}s registado`);
+      return;
+    }
+    runClip(task);
+  }
+
+  async function runClip({ seconds, useServer, editor, clickTime, snapshot, snapshotGen, rotated }) {
+    state.busy = true;
+    render('A preparar clip de ' + seconds + 's…');
     try {
-      const clickTime = now();
-      // Guarda as referências antes da descarga: o buffer pode rodar ou ser reiniciado entretanto.
-      const snapshot = state.segments.slice();
-      const snapshotGen = bufferGen;
-      // Fecha o segmento atual exatamente agora (fica como reserva); não se espera por isto
-      // antes do modo live, para a posição do player ser lida no instante do clique.
-      const rotated = state.stream ? rotate().then(scheduleRotation) : Promise.resolve();
-      rotated.catch(() => {});
       let job = null, serverError = null;
       if (useServer) {
         try {
@@ -323,7 +344,8 @@
       toast('Falhou: ' + e.message);
     } finally {
       state.busy = false;
-      render();
+      const next = clipQueue.shift();
+      if (next) runClip(next); else render();
     }
   }
 
@@ -665,7 +687,9 @@
     panel.classList.toggle('sc-live', live);
     panel.querySelectorAll('.sc-clip, .sc-continue').forEach((b) => {
       const isContinue = b.classList.contains('sc-continue');
-      b.disabled = (isContinue ? !rec : !(rec || live)) || state.busy || manualOn;
+      // Os clips de duração fixa entram em fila enquanto um está a processar (não bloqueiam);
+      // só a gravação manual (● REC / +continuar) fica mesmo à espera.
+      b.disabled = (isContinue ? !rec : !(rec || live)) || (isContinue && state.busy) || manualOn;
       b.classList.toggle('sc-partial', rec && buf < +b.dataset.s);
     });
     const recBtn = panel.querySelector('.sc-rec-btn'), pauseBtn = panel.querySelector('.sc-pause');
@@ -681,12 +705,13 @@
       ? `❚❚ Pausado · ${fmtSecs(manualSecs())} gravados`
       : manual.preRollSeconds ? `● Clip: até ${manual.preRollSeconds}s antes + ${fmtSecs(manualSecs())}` : `● A gravar · ${fmtSecs(manualSecs())}`;
     const backup = rec ? ` · reserva ${Math.floor(buf)}s` : '';
-    statusEl.textContent = msg
+    const base = msg
       || (state.error ? state.error + (live ? ' · ' + server.label() : '')
       : live ? server.label() + backup
       : !state.enabled ? 'Buffer desligado'
       : rec ? `A gravar · ${Math.floor(buf)}s em buffer`
       : 'À espera de um vídeo…');
+    statusEl.textContent = clipQueue.length ? `${base} · ${clipQueue.length} clip${clipQueue.length > 1 ? 's' : ''} em fila` : base;
   }
 
   function toast(text) {

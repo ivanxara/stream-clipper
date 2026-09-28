@@ -312,7 +312,7 @@ function currentTimelineTime() {
     const clip = st.sequenceClips[activeSequenceIndex];
     return clip ? sequenceStart(activeSequenceIndex) + clamp(sequenceVideo.currentTime - (clip.trimStart || 0), 0, sequenceClipLength(clip)) : editDuration();
   }
-  return sourceToEdit(video.currentTime || 0);
+  return activeSourceToEdit(video.currentTime || 0);
 }
 function fittedSequenceSource(src) {
   if (sequenceFitCanvas.width !== st.srcW || sequenceFitCanvas.height !== st.srcH) {
@@ -390,10 +390,13 @@ function loopPreview() {
     if (i < 0) {
       const next = ranges.find(r => r.start > video.currentTime);
       video.currentTime = next ? next.start : ranges[0]?.start || st.start;
-    } else if (video.currentTime >= ranges[i].end - 0.01) {
-      if (ranges[i + 1]) video.currentTime = ranges[i + 1].start;
-      else if (st.sequenceClips.length) activateSequenceClip(0, 0, true);
-      else video.currentTime = ranges[0]?.start ?? st.start;
+    } else {
+      st.activePart = i;   // segue o segmento a tocar (desambigua duplicados para activeSourceToEdit)
+      if (video.currentTime >= ranges[i].end - 0.01) {
+        if (ranges[i + 1]) video.currentTime = ranges[i + 1].start;
+        else if (st.sequenceClips.length) activateSequenceClip(0, 0, true);
+        else video.currentTime = ranges[0]?.start ?? st.start;
+      }
     }
   }
   if (st.layout === 'crop' || drag) placeRects();                                    // a moldura segue as posições
@@ -484,7 +487,7 @@ function startDrag(e, id, mode) {
     const done = drag;
     drag = null;
     if (ev.type === 'pointercancel') { restoreVideoEdit(before); return; }
-    if (id === 'crop') setCropKey(video.currentTime, done.rect); else rememberCam();
+    if (id === 'crop') updateCropKey(video.currentTime, done.rect); else rememberCam();
     placeRects();
     recordVideoEdit(before);
   };
@@ -497,13 +500,25 @@ function setRect(id, r) {
   st.streamer[id] = r;
 }
 
-// Mexer na moldura num instante cria (ou atualiza) uma posição nesse instante.
-function setCropKey(t, r) {
+// Arrastar/fazer zoom na moldura nunca cria uma posição sozinho (era assim que uma posição
+// fixa se transformava numa animação só por se estar a meio do vídeo): ajusta sempre a posição
+// já existente mais próxima do instante atual, ou cria a primeira se ainda não houver nenhuma.
+function updateCropKey(t, r) {
+  const k = st.crop.keys;
+  if (!k.length) k.push({ t, ...r });
+  else Object.assign(k.reduce((best, p) => Math.abs(p.t - t) < Math.abs(best.t - t) ? p : best), r);
+  try { localStorage.setItem('sc.crop', JSON.stringify({ x: r.x, y: r.y, w: r.w })); } catch {}
+  renderOpts();
+  renderKeys();
+}
+
+// Ação explícita («+ Posição aqui»): cria uma posição nova no instante atual (ou atualiza uma já
+// quase no mesmo instante) — é a única forma de começar a animar a moldura.
+function addCropKeyAt(t, r) {
   const k = st.crop.keys;
   const near = k.find((p) => Math.abs(p.t - t) < 0.25);
   if (near) Object.assign(near, r);
-  else k.push({ t, ...r });
-  k.sort((a, b) => a.t - b.t);
+  else { k.push({ t, ...r }); k.sort((a, b) => a.t - b.t); }
   try { localStorage.setItem('sc.crop', JSON.stringify({ x: r.x, y: r.y, w: r.w })); } catch {}
   renderOpts();
   renderKeys();
@@ -512,25 +527,67 @@ function setCropKey(t, r) {
 // ---------- barra de tempo ----------
 const tl = $('#timeline');
 let activeSequenceIndex = -1, sequenceURL = null;
-function sourceToEdit(time) {
+function rippleRemovedBetween(a, b) {
   let removed = 0;
-  for (const cut of [...(st.rippleCuts || [])].sort((a, b) => a.start - b.start)) {
-    if (time < cut.start) break;
-    if (time < cut.end) return cut.start - removed;
-    removed += cut.end - cut.start;
+  for (const cut of st.rippleCuts || []) {
+    const s = Math.max(a, cut.start), e = Math.min(b, cut.end);
+    if (e > s) removed += e - s;
   }
-  return time - removed;
+  return removed;
+}
+// A ordem de exportação (getRanges(), por índice) é que define a posição na régua — não a ordem
+// cronológica da fonte. É isto que permite arrastar um segmento para outra posição e vê-lo mesmo
+// deslocado na régua (antes só a numeração "ordem de exportação N" mudava, a posição não).
+// Entre segmentos array-adjacentes que ainda seguem a ordem cronológica (o caso normal, sem
+// arrastar nada), mantém-se o espaço do que foi cortado — para o "↶ Repor trecho" continuar a
+// fazer sentido. Entre segmentos fora de ordem (foram arrastados), encosta-se um ao outro: não há
+// "espaço cortado" nenhum para repor entre dois troços que nunca foram vizinhos na fonte.
+function rangeOffsets() {
+  let cursor = 0, prevEnd = null;
+  return getRanges().map((r) => {
+    const len = Math.max(0, r.end - r.start);
+    const editStart = prevEnd != null && r.start >= prevEnd - 0.05
+      ? cursor + Math.max(0, (r.start - prevEnd) - rippleRemovedBetween(prevEnd, r.start))
+      : cursor;
+    const editEnd = editStart + len;
+    cursor = editEnd;
+    prevEnd = r.end;
+    return { start: r.start, end: r.end, editStart, editEnd };
+  });
+}
+function editDuration() {
+  const offs = rangeOffsets();
+  return offs.length ? offs.at(-1).editEnd : 0;
+}
+// Sem ocorrência preferida, usa a 1ª que bate com o tempo (um segmento duplicado repete o mesmo
+// tempo de origem lá para trás — só ambíguo para posicionar elementos/◆, nunca para o cursor).
+function sourceToEdit(time, offs = rangeOffsets()) {
+  if (!offs.length) return 0;
+  const hit = offs.find((r) => time >= r.start - 0.001 && time <= r.end + 0.001);
+  if (hit) return hit.editStart + clamp(time - hit.start, 0, hit.end - hit.start);
+  let best = offs[0], bestDist = Infinity;
+  for (const r of offs) {
+    const dist = time < r.start ? r.start - time : time - r.end;
+    if (dist < bestDist) { bestDist = dist; best = r; }
+  }
+  return time < best.start ? best.editStart : best.editEnd;
 }
 function editToSource(time) {
-  let removed = 0;
-  for (const cut of [...(st.rippleCuts || [])].sort((a, b) => a.start - b.start)) {
-    const seam = cut.start - removed;
-    if (time < seam) break;
-    removed += cut.end - cut.start;
-  }
-  return time + removed;
+  const offs = rangeOffsets();
+  if (!offs.length) return 0;
+  const hit = offs.find((r) => time >= r.editStart - 0.001 && time <= r.editEnd + 0.001);
+  if (hit) return hit.start + clamp(time - hit.editStart, 0, hit.end - hit.start);
+  return time < 0 ? offs[0].start : offs.at(-1).end;
 }
-const editDuration = () => sourceToEdit(st.dur);
+// Posição do cursor: prefere a ocorrência ativa (st.activePart) quando ela contém o tempo atual,
+// para desambiguar segmentos duplicados — sourceToEdit sozinho escolheria sempre a 1ª ocorrência.
+function activeSourceToEdit(time) {
+  const offs = rangeOffsets(), active = offs[st.activePart];
+  if (active && time >= active.start - 0.02 && time <= active.end + 0.02) {
+    return active.editStart + clamp(time - active.start, 0, active.end - active.start);
+  }
+  return sourceToEdit(time, offs);
+}
 const sequenceClipLength = clip => Math.max(0, (clip.trimEnd ?? clip.dur) - (clip.trimStart || 0));
 const queuedDuration = () => st.sequenceClips.reduce((sum, clip) => sum + sequenceClipLength(clip), 0);
 const timelineDuration = () => editDuration() + queuedDuration();
@@ -612,10 +669,16 @@ function syncAudioPreview(force = false) {
   for (const [id] of audioPreview) if (!st.audioTracks.some(track => track.id === id)) disposeAudioPreview(id);
 }
 
-function selectAudio(id, showPanel = true) {
+// Só troca a classe "on" no bloco já existente, sem refazer o innerHTML da faixa. Chamado no
+// meio de um arrastar: um renderAudioTracks() ali destruiria o próprio bloco que o pointerdown
+// está a agarrar (fica sem parentElement) e o arrastar morre logo ali, sem erro visível.
+function highlightAudioSelection() {
+  $('#audioTracks')?.querySelectorAll('[data-audio]').forEach((b) => b.classList.toggle('on', b.dataset.audio === st.audioSel));
+}
+function selectAudio(id, showPanel = true, keepTracksDom = false) {
   st.audioSel = st.audioTracks.some(track => track.id === id) ? id : null;
   if (st.audioSel) elementEditor?.select(null);
-  renderAudioTracks();
+  if (keepTracksDom) highlightAudioSelection(); else renderAudioTracks();
   updateTimelineTools();
   if (showPanel) renderTextOpts();
 }
@@ -728,7 +791,7 @@ $('#audioTracks').addEventListener('pointerdown', event => {
   if (!block || event.button !== 0 || st.busy) return;
   const track = st.audioTracks.find(item => item.id === block.dataset.audio);
   if (!track) return;
-  event.preventDefault(); event.stopPropagation(); video.pause(); selectAudio(track.id, false);
+  event.preventDefault(); event.stopPropagation(); video.pause(); selectAudio(track.id, false, true);
   const before = beginVideoEdit(), initial = { ...track }, lane = block.parentElement.getBoundingClientRect();
   const edge = event.target.dataset.audioEdge, x0 = event.clientX, duration = timelineDuration();
   block.setPointerCapture(event.pointerId);
@@ -790,30 +853,34 @@ function selectPartAt(t) {
 function updateTimeline() {
   elementEditor?.renderTracks();
   renderAudioTracks();
-  const ranges = getRanges(), wrap = $('#ranges');
+  const ranges = getRanges(), offs = rangeOffsets(), wrap = $('#ranges');
   st.activePart = clamp(st.activePart, 0, Math.max(0, ranges.length - 1));
+  const editDur = offs.length ? offs.at(-1).editEnd : 0, dur = (editDur + queuedDuration()) || 1;
+  const editLeftPct = (t) => `${t / dur * 100}%`;
+  const editWidthPct = (a, b) => `${Math.max(0, (b - a) / dur * 100)}%`;
   const gaps = [], marks = [];
-  const addGap = (start, end) => {
+  // start/end em atIndex indicam onde reinserir no array (st.parts) se a pessoa repuser o troço.
+  const addGap = (editStart, editEnd, srcStart, srcEnd, atIndex) => {
     const removed = document.createElement('button');
     removed.type = 'button';
     removed.className = 'cutGap';
-    removed.style.left = pct(start);
-    removed.style.width = `${Math.max(0, (sourceToEdit(end) - sourceToEdit(start)) / (timelineDuration() || 1) * 100)}%`;
-    removed.dataset.start = start;
-    removed.dataset.end = end;
-    removed.title = `Repor trecho removido: ${fmt(start)} – ${fmt(end)}`;
+    removed.style.left = editLeftPct(editStart);
+    removed.style.width = editWidthPct(editStart, editEnd);
+    removed.dataset.start = srcStart;
+    removed.dataset.end = srcEnd;
+    removed.title = `Repor trecho removido: ${fmt(srcStart)} – ${fmt(srcEnd)}`;
     removed.setAttribute('aria-label', removed.title);
-    const gapWidth = timelineDuration() ? (sourceToEdit(end) - sourceToEdit(start)) / timelineDuration() * tl.clientWidth : 0;
+    const gapWidth = (editEnd - editStart) / dur * tl.clientWidth;
     removed.textContent = gapWidth >= 78 ? '↶ Repor trecho' : '↶';
     removed.addEventListener('pointerdown', e => e.stopPropagation());
-    removed.addEventListener('click', e => { e.stopPropagation(); restoreGap(start, end); });
+    removed.addEventListener('click', e => { e.stopPropagation(); restoreGap(srcStart, srcEnd, atIndex); });
     gaps.push(removed);
   };
-  const addRippleMarker = cut => {
+  const addRippleMarker = (editPos, cut, atIndex) => {
     const marker = document.createElement('button');
     marker.type = 'button';
     marker.className = 'cutGap rippleCut';
-    const position = parseFloat(pct(cut.start));
+    const position = clamp(editPos / dur * 100, 0, 100);
     marker.style.left = position >= 100 ? 'calc(100% - 16px)' : position <= 0 ? '0%' : `calc(${position}% - 8px)`;
     marker.style.width = '16px';
     marker.style.marginLeft = '-8px';
@@ -823,48 +890,54 @@ function updateTimeline() {
     marker.setAttribute('aria-label', marker.title);
     marker.textContent = '↶';
     marker.addEventListener('pointerdown', e => e.stopPropagation());
-    marker.addEventListener('click', e => { e.stopPropagation(); restoreGap(cut.start, cut.end); });
+    marker.addEventListener('click', e => { e.stopPropagation(); restoreGap(cut.start, cut.end, atIndex); });
     gaps.push(marker);
   };
-  const addRemovedInterval = (start, end) => {
-    let cursor = start;
+  // Preenche [srcStart,srcEnd] (fonte), que ocupa [editStart0,editEnd0] na régua, com os cortes
+  // fechados (ripple) lá dentro e o resto como troço simples por repor.
+  const addRemovedInterval = (srcStart, srcEnd, editStart0, editEnd0, atIndex) => {
+    let cursorSrc = srcStart, cursorEdit = editStart0;
+    const span = srcEnd - srcStart || 1;
+    const editAt = (s) => editStart0 + (editEnd0 - editStart0) * clamp((s - srcStart) / span, 0, 1);
     for (const cut of [...st.rippleCuts].sort((a, b) => a.start - b.start)) {
-      if (cut.end <= cursor || cut.start >= end) continue;
-      if (cut.start - cursor > 0.05) addGap(cursor, cut.start);
-      addRippleMarker(cut);
-      cursor = Math.max(cursor, cut.end);
+      if (cut.end <= cursorSrc || cut.start >= srcEnd) continue;
+      if (cut.start - cursorSrc > 0.05) addGap(cursorEdit, editAt(cut.start), cursorSrc, cut.start, atIndex);
+      addRippleMarker(editAt(cut.start), cut, atIndex);
+      cursorSrc = Math.max(cursorSrc, cut.end);
+      cursorEdit = editAt(cursorSrc);
     }
-    if (end - cursor > 0.05) addGap(cursor, end);
+    if (srcEnd - cursorSrc > 0.05) addGap(cursorEdit, editEnd0, cursorSrc, srcEnd, atIndex);
   };
-  if (ranges.length && ranges[0].start - st.start > 0.05) addRemovedInterval(st.start, ranges[0].start);
+  // "Reordenado" (arrastado) não tem um trecho cortado que faça sentido repor entre os dois — só
+  // se mostra o "Repor trecho"/divisão quando os vizinhos no array também são vizinhos na fonte.
+  const chronoFirst = ranges.length && ranges[0].start <= Math.min(...ranges.map(r => r.start)) + 0.01;
+  const chronoLast = ranges.length && ranges.at(-1).end >= Math.max(...ranges.map(r => r.end)) - 0.01;
+  if (chronoFirst && ranges[0].start - st.start > 0.05) addRemovedInterval(st.start, ranges[0].start, 0, offs[0].editStart, 0);
   for (let i = 1; i < ranges.length; i++) {
     const previous = ranges[i - 1], next = ranges[i], gap = next.start - previous.end;
+    if (next.start < previous.end - 0.05) continue;   // ordem trocada: encostam-se, sem espaço a repor
     if (gap > 0.05) {
-      addRemovedInterval(previous.end, next.start);
+      addRemovedInterval(previous.end, next.start, offs[i - 1].editEnd, offs[i].editStart, i);
     } else {
       const marker = document.createElement('span');
       marker.className = 'splitMarker';
-      marker.style.left = pct(previous.end);
+      marker.style.left = editLeftPct(offs[i - 1].editEnd);
       marker.title = `Divisão entre segmentos ${i} e ${i + 1}`;
       marker.setAttribute('aria-hidden', 'true');
       marks.push(marker);
     }
   }
-  if (ranges.length && st.end - ranges.at(-1).end > 0.05) addRemovedInterval(ranges.at(-1).end, st.end);
+  if (chronoLast && st.end - ranges.at(-1).end > 0.05) addRemovedInterval(ranges.at(-1).end, st.end, offs.at(-1).editEnd, editDur, ranges.length);
   const clips = ranges.map((r, i) => {
     const occurrence = rangeOccurrences(ranges, i), repeated = occurrence.count > 1;
     const range = document.createElement('button');
     range.type = 'button';
     range.className = 'range' + (i === st.activePart ? ' active' : '') + (repeated && occurrence.position > 0 ? ' duplicate' : '');
-    range.style.left = pct(r.start);
-    range.style.width = `${Math.max(0, (sourceToEdit(r.end) - sourceToEdit(r.start)) / (timelineDuration() || 1) * 100)}%`;
-    if (repeated) {
-      const height = Math.min(8, 25 / occurrence.count);
-      range.style.top = `${2 + occurrence.position * height}px`;
-      range.style.height = `${height}px`;
-    }
+    range.style.left = editLeftPct(offs[i].editStart);
+    range.style.width = editWidthPct(offs[i].editStart, offs[i].editEnd);
+    if (ranges.length > 1) range.draggable = true;   // arrastar troca a ordem de exportação
     const copyLabel = repeated ? (occurrence.position ? ` · cópia ${occurrence.position + 1}/${occurrence.count}` : ` · origem de ${occurrence.count} ocorrências`) : '';
-    range.title = `Segmento ${i + 1}${copyLabel}: ${fmt(sourceToEdit(r.start))} – ${fmt(sourceToEdit(r.end))} · ordem de exportação ${i + 1}`;
+    range.title = `Segmento ${i + 1}${copyLabel}: ${fmt(r.start)} – ${fmt(r.end)} · ordem de exportação ${i + 1}` + (ranges.length > 1 ? ' · arrasta para reordenar' : '');
     range.setAttribute('aria-label', range.title);
     range.setAttribute('aria-pressed', String(i === st.activePart));
     range.textContent = `${i + 1} · ${fmt(r.end - r.start)}`;
@@ -1073,7 +1146,7 @@ $('#setIn').addEventListener('click', () => {
     clip.trimStart = cut; updateTimeline(); saveSession(); return;
   }
   if (audioItem()) {
-    const track = audioItem(), t = sourceToEdit(video.currentTime);
+    const track = audioItem(), t = activeSourceToEdit(video.currentTime);
     if (t < track.start || t >= audioEnd(track) - .05) return;
     const before = beginVideoEdit(); track.trimStart += t - track.start; track.start = t;
     renderAudioTracks(); renderTextOpts(); recordVideoEdit(before); return;
@@ -1089,7 +1162,7 @@ $('#setOut').addEventListener('click', () => {
     clip.trimEnd = cut; updateTimeline(); saveSession(); return;
   }
   if (audioItem()) {
-    const track = audioItem(), t = sourceToEdit(video.currentTime);
+    const track = audioItem(), t = activeSourceToEdit(video.currentTime);
     if (t <= track.start + .05 || t > audioEnd(track)) return;
     const before = beginVideoEdit(); track.trimEnd = track.trimStart + t - track.start;
     renderAudioTracks(); renderTextOpts(); recordVideoEdit(before); return;
@@ -1149,14 +1222,19 @@ function rippleDeletePart() {
   updateTimeline();
   recordVideoEdit(before);
 }
-function restoreGap(start, end) {
+function restoreGap(start, end, atIndex) {
   if (!st.mp4 || st.busy || end - start <= 0.05) return;
   const ranges = getRanges();
   if (ranges.some(r => Math.min(end, r.end) - Math.max(start, r.start) > 0.01)) return;
   const before = beginVideoEdit();
   st.rippleCuts = st.rippleCuts.filter(cut => Math.abs(cut.start - start) > 0.01 || Math.abs(cut.end - end) > 0.01);
-  st.parts = [...ranges, { start, end }].sort((a, b) => a.start - b.start);
-  st.activePart = st.parts.findIndex(r => r.start === start && r.end === end);
+  // Insere no índice de onde veio (não reordena o array todo): um "repor trecho" nunca deve
+  // desfazer uma reordenação manual feita noutro sítio da timeline.
+  const parts = ranges.map(r => ({ ...r }));
+  const insertAt = clamp(atIndex ?? parts.length, 0, parts.length);
+  parts.splice(insertAt, 0, { start, end });
+  st.parts = parts;
+  st.activePart = insertAt;
   video.pause();
   video.currentTime = start + Math.min(0.05, (end - start) / 2);
   updateTimeline();
@@ -1296,6 +1374,58 @@ videoMenu.addEventListener('keydown', e => {
 document.addEventListener('pointerdown', e => { if (!videoMenu.contains(e.target)) closeVideoMenu(); });
 document.addEventListener('scroll', () => closeVideoMenu(), true);
 addEventListener('resize', () => closeVideoMenu());
+
+// Arrastar um segmento para outra posição troca a ordem de reprodução/exportação — a régua agora
+// posiciona-os por essa ordem (rangeOffsets()), por isso o segmento visivelmente muda de lugar.
+// Drag-and-drop nativo (não pointer capture): nunca se chama updateTimeline() a meio do arrasto,
+// só no drop — a meio destruiria o próprio nó que o gesto está a agarrar.
+let dragPartFrom = null;
+function partEls() { return [...document.querySelectorAll('#ranges .range:not(.sequenceRange)')]; }
+function clearPartDragMarks() { partEls().forEach(el => el.classList.remove('dragging', 'dragOverBefore', 'dragOverAfter')); }
+function reorderPart(from, targetIndex, before) {
+  if (!st.mp4 || st.busy || from === targetIndex) return;
+  const ranges = getRanges();
+  if (from < 0 || from >= ranges.length) return;
+  const videoBefore = beginVideoEdit();
+  const parts = ranges.map(r => ({ ...r }));
+  const [moved] = parts.splice(from, 1);
+  let to = targetIndex > from ? targetIndex - 1 : targetIndex;
+  if (!before) to++;
+  parts.splice(clamp(to, 0, parts.length), 0, moved);
+  st.parts = parts;
+  st.activePart = parts.indexOf(moved);
+  updateTimeline();
+  recordVideoEdit(videoBefore);
+}
+$('#ranges').addEventListener('dragstart', e => {
+  const target = e.target.closest('.range:not(.sequenceRange)');
+  if (!target || st.busy) { e.preventDefault(); return; }
+  dragPartFrom = partEls().indexOf(target);
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', String(dragPartFrom));   // o Firefox exige dados para o drag arrancar
+  target.classList.add('dragging');
+});
+$('#ranges').addEventListener('dragover', e => {
+  const target = e.target.closest('.range:not(.sequenceRange)');
+  if (!target || dragPartFrom == null) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  const r = target.getBoundingClientRect(), before = e.clientX < r.left + r.width / 2;
+  partEls().forEach(el => el.classList.remove('dragOverBefore', 'dragOverAfter'));
+  target.classList.add(before ? 'dragOverBefore' : 'dragOverAfter');
+});
+$('#ranges').addEventListener('drop', e => {
+  const target = e.target.closest('.range:not(.sequenceRange)');
+  if (target && dragPartFrom != null) {
+    e.preventDefault();
+    const r = target.getBoundingClientRect();
+    reorderPart(dragPartFrom, partEls().indexOf(target), e.clientX < r.left + r.width / 2);
+  }
+  dragPartFrom = null;
+  clearPartDragMarks();
+});
+$('#ranges').addEventListener('dragend', () => { dragPartFrom = null; clearPartDragMarks(); });
+
 $('#play').addEventListener('click', togglePlay);
 function togglePlay() {
   if (!st.mp4) return;
@@ -1312,23 +1442,14 @@ function togglePlay() {
 }
 const LAYOUT_KEYS = ['streamer', 'crop', 'blur', 'original'];
 const seekBy = (dt) => {
-  const ranges = getRanges();
-  if (!ranges.length) return;
-  let offset = 0, found = false;
-  for (const r of ranges) {
-    const start = sourceToEdit(r.start), end = sourceToEdit(r.end);
-    const length = end - start;
-    if (video.currentTime >= r.start && video.currentTime <= r.end) { offset += clamp(sourceToEdit(video.currentTime) - start, 0, length); found = true; break; }
-    offset += length;
-  }
-  if (!found && video.currentTime < ranges[0].start) offset = 0;
-  const total = ranges.reduce((sum, r) => sum + sourceToEdit(r.end) - sourceToEdit(r.start), 0);
-  let target = clamp(offset + dt, 0, total);
-  for (const r of ranges) {
-    const start = sourceToEdit(r.start), len = sourceToEdit(r.end) - start;
-    if (target <= len) { video.pause(); video.currentTime = editToSource(start + target); selectPartAt(video.currentTime); updateTimeline(); return; }
-    target -= len;
-  }
+  const offs = rangeOffsets();
+  if (!offs.length) return;
+  const total = offs.at(-1).editEnd;
+  const target = clamp(activeSourceToEdit(video.currentTime) + dt, 0, total);
+  video.pause();
+  video.currentTime = editToSource(target);
+  selectPartAt(video.currentTime);
+  updateTimeline();
 };
 document.addEventListener('keydown', (e) => {
   if (e.target.closest('dialog, [role="menu"]')) return;
@@ -1380,16 +1501,25 @@ function renderOpts() {
   const hint = $('#hint');
   if (st.layout === 'crop') {
     const keys = st.crop.keys;
+    // As posições em si já se veem e mexem na barra de baixo (◆): arrasta para mudar o instante,
+    // clique vai para lá, botão direito/duplo clique apaga. A lista aqui era a mesma informação
+    // duas vezes — só ficam os botões que não têm equivalente na timeline.
     o.innerHTML = `<div class="opt">
       <h2>Posições da moldura</h2>
-      <div class="keylist">${keys.length ? keys.map((k, i) => `<div class="k"><span class="mono">${fmt(k.t)}</span><button data-go="${i}" title="Ir para aqui">↦</button><button data-del="${i}" title="Apagar">✕</button></div>`).join('')
-        : '<span class="muted">Sem posições: a moldura fica ao centro.</span>'}</div>
+      ${keys.length ? '<p class="muted small">Os ◆ na barra de baixo mostram as posições: arrasta para mudar o instante, clique vai para lá, botão direito ou duplo clique apaga.</p>'
+        : '<p class="muted small">Sem posições: a moldura fica ao centro.</p>'}
+      <button id="addCropKey" class="btn small" title="Cria uma posição nova no instante atual, para animar a moldura">◆ Posição aqui</button>
       ${keys.length ? '<button id="clearKeys" class="btn small danger">Apagar posições</button>' : ''}
     </div>`;
-    o.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => { const before = beginVideoEdit(); keys.splice(+b.dataset.del, 1); renderOpts(); renderKeys(); recordVideoEdit(before); }));
-    o.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => { video.currentTime = keys[+b.dataset.go].t; }));
+    o.querySelector('#addCropKey').addEventListener('click', () => {
+      const before = beginVideoEdit(), cur = cropAt(video.currentTime);
+      addCropKeyAt(video.currentTime, { x: cur.x, y: cur.y, w: cur.w });
+      recordVideoEdit(before);
+    });
     o.querySelector('#clearKeys')?.addEventListener('click', () => { const before = beginVideoEdit(); keys.length = 0; renderOpts(); renderKeys(); recordVideoEdit(before); });
-    hint.textContent = 'No resultado: arrasta para enquadrar, roda do rato = zoom. Para a moldura se mover: vai a outro instante e arrasta outra vez (◆).';
+    hint.textContent = keys.length > 1
+      ? 'No resultado: arrasta para enquadrar, roda do rato = zoom (ajusta a posição mais próxima). Para a moldura se mover mais, carrega em «◆ Posição aqui» noutro instante e ajusta.'
+      : 'No resultado: arrasta para enquadrar, roda do rato = zoom — fica fixo em todo o clip. Para a moldura se mover, carrega em «◆ Posição aqui» noutro instante e ajusta aí.';
   } else if (st.layout === 'streamer') {
     renderStreamerOpts(o);
     hint.textContent = 'No resultado: arrasta a câmara ou a parte de baixo para enquadrar, roda do rato = zoom. No original também dá para mexer nas caixas.';
@@ -1490,7 +1620,7 @@ function zoneAt(e) {
 }
 
 function setZoneRect(id, r) {
-  if (id === 'crop') setCropKey(video.currentTime, r);
+  if (id === 'crop') updateCropKey(video.currentTime, r);
   else { setRect(id, r); rememberCam(); }
   placeRects();
 }
@@ -2021,7 +2151,7 @@ const libraryReady = (async () => {
 
 // ---------- textos (por cima de tudo, em todos os formatos) ----------
 // {id, text, x, y (centro do bloco, 0..1 do resultado), size (altura da letra / largura), color,
-//  style: 'outline'|'box'|'plain', align: 'left'|'center'|'right', font, keep}
+//  style: 'outline'|'box'|'plain', align: 'left'|'center'|'right', font}
 const FONTS = {
   montserrat: ['Montserrat ExtraBold', (px) => `800 ${px}px "Montserrat", Arial, sans-serif`],
   anton: ['Anton', (px) => `400 ${px}px "Anton", Impact, sans-serif`],
@@ -2037,22 +2167,23 @@ const TEXT_PRESETS = [
   { id: 'headline', name: 'Título', sample: 'WOW', title: 'Título condensado em maiúsculas', values: { font: 'bebas', size: 0.12, color: '#ffffff', style: 'outline', align: 'center', uppercase: true, y: 0.22 } },
 ];
 const TEXT_COLORS = ['#ffffff', '#ffe600', '#ff3b5c', '#25f4ee', '#22c55e', '#000000'];
+const TEXT_SIZE_PRESETS = [4, 6, 8, 10, 12, 16, 20, 25];   // sugestões do combo de tamanho (estilo Word)
 const TEXT_STYLE_KEYS = ['size', 'color', 'style', 'align', 'font', 'uppercase'];
 let textSeq = 0;
 
 const loadJSON = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
 const saveJSON = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
-st.texts = loadJSON('sc.texts', []).map((t) => ({ ...t, id: 'T' + ++textSeq }));   // os marcados "manter"
+st.texts = [];
 st.textSel = null;
+try { localStorage.removeItem('sc.texts'); } catch {}   // "manter nos próximos clips" foi removido: os templates já cobrem isto
 
 const selText = () => st.texts.find((t) => t.id === st.textSel);
 const isDark = (hex) => { const n = parseInt(hex.slice(1), 16); return ((n >> 16) * 299 + ((n >> 8) & 255) * 587 + (n & 255) * 114) / 1000 < 110; };
 
-// Guarda o estilo (para o próximo texto) e os textos marcados para manter.
+// Guarda o estilo para o próximo texto.
 function saveTexts() {
   const t = selText();
   if (t) saveJSON('sc.textStyle', Object.fromEntries(TEXT_STYLE_KEYS.map((k) => [k, t[k]])));
-  saveJSON('sc.texts', st.texts.filter((x) => x.keep).map(({ id, _box, ...rest }) => rest));
   elementEditor?.changed();
 }
 
@@ -2131,7 +2262,7 @@ function addText() {
   const d = { size: 0.075, color: '#ffffff', style: 'outline', align: 'center', font: 'montserrat', uppercase: false, ...loadJSON('sc.textStyle', {}) };
   let y = st.layout === 'streamer' ? st.streamer.split : 0.2;
   while (y < 0.9 && st.texts.some((t) => Math.abs(t.y - y) < 0.04)) y = Math.min(0.92, y + 0.09);
-  const t = { id: 'T' + ++textSeq, text: 'Texto', x: 0.5, y, keep: false, ...d, rotation: 0, z: elementEditor?.nextZ() || 0, in: 0, out: null };
+  const t = { id: 'T' + ++textSeq, text: 'Texto', x: 0.5, y, ...d, rotation: 0, z: elementEditor?.nextZ() || 0, in: 0, out: null };
   st.texts.push(t);
   elementEditor?.commit();
   selectText(t.id, true);
@@ -2147,8 +2278,7 @@ function selectText(id, focus) {
 function syncTextSize() {
   const t = selText(), inp = $('#tSize');
   if (!t || !inp) return;
-  inp.value = t.size;
-  $('#tSizeV').textContent = Math.round(t.size * 1000) / 10;
+  inp.value = Math.round(t.size * 1000) / 10;
 }
 
 const ALIGN_ICONS = {
@@ -2158,6 +2288,8 @@ const ALIGN_ICONS = {
 };
 
 let elementPanel = '';
+// Por omissão só a caixa de texto/lista de elementos fica visível; "Estilo e posição" começa
+// fechado (a lista tem de caber sem scroll) e só fica aberto nos elementos em que o utilizador o abriu.
 const expandedElementOptions = new Set();
 
 async function removeLibraryFile(id) {
@@ -2240,52 +2372,54 @@ function renderTextOpts() {
   elementEditor?.renderTracks();
   const o = $('#textOpts'), audio = audioItem();
   if (audio) { renderAudioOptions(o, audio); return; }
-  const t = elementPanel ? null : selText();
-  const selected = elementPanel ? null : elementEditor?.selected();
+  const t = elementPanel === 'image' ? null : selText();
+  const selected = elementPanel === 'image' ? null : elementEditor?.selected();
   const presetButtons = t ? TEXT_PRESETS.map(preset => {
     const active = Object.entries(preset.values).filter(([key]) => key !== 'y').every(([key, value]) => t[key] === value);
     return `<button type="button" class="textPreset${active ? ' on' : ''}" data-text-preset="${preset.id}" aria-pressed="${active}" title="${preset.title}"><span class="presetPreview presetPreview--${preset.id}">${preset.sample}</span><span class="presetName">${preset.name}</span></button>`;
   }).join('') : '';
-  const chips = orderedElements(st).reverse().map((x, i) =>
-    `<div class="elementRow${x.id === st.textSel ? ' on' : ''}"><button class="elementSelect" data-tid="${x.id}" title="Selecionar"><span class="elementType" aria-hidden="true">${x.mediaId ? (libItem(x.mediaId)?.thumb ? `<img src="${esc(libItem(x.mediaId).thumb)}" alt="">` : '▧') : 'T'}</span><span class="elementName">${esc(x.mediaId ? (libItem(x.mediaId)?.name || 'Imagem') : x.text.split('\n')[0].slice(0, 40) || 'Texto ' + (i + 1))}</span></button></div>`).join('');
+  const chips = orderedElements(st).reverse().map((x, i) => {
+    const name = esc(x.mediaId ? (libItem(x.mediaId)?.name || 'Imagem') : x.text.split('\n')[0].slice(0, 40) || 'Texto ' + (i + 1));
+    return `<div class="elementRow${x.id === st.textSel ? ' on' : ''}"><button class="elementSelect" data-tid="${x.id}" title="Selecionar">
+      <span class="elementType" aria-hidden="true">${x.mediaId ? (libItem(x.mediaId)?.thumb ? `<img src="${esc(libItem(x.mediaId).thumb)}" alt="">` : '▧') : 'T'}</span>
+      <span class="elementName">${name}</span>
+    </button><button class="elementDelete" data-tdel="${x.id}" title="Apagar ${name}" aria-label="Apagar ${name}">✕</button></div>`;
+  }).join('');
   o.innerHTML = `<div class="opt">
-    <div class="hrow"><h2>Elementos</h2><button id="addElement" class="btn small" aria-expanded="${!!elementPanel}" aria-controls="elementPicker">+ Adicionar elemento</button></div>
-    ${elementPanel ? `<div id="elementPicker" class="elementPicker">
-      <div class="seg"><button id="addText" title="Adicionar texto (T)">Texto <kbd>T</kbd></button><button id="showImages" class="${elementPanel === 'image' ? 'on' : ''}">Ficheiro</button></div>
-      ${elementPanel === 'image' ? imagePickerHtml() : ''}
-    </div>` : ''}
+    <div class="hrow"><h2>Elementos</h2></div>
     ${chips ? `<div class="elementList">${chips}</div>` : ''}
+    <div class="seg"><button id="addText" title="Adicionar texto (T)">+ Texto <kbd>T</kbd></button><button id="showImages" class="${elementPanel === 'image' ? 'on' : ''}">+ Ficheiro</button></div>
+    ${elementPanel === 'image' ? `<div id="elementPicker" class="elementPicker">${imagePickerHtml()}</div>` : ''}
     ${t ? `<textarea id="tText" aria-label="Texto do elemento" rows="2" placeholder="Escreve aqui…">${esc(t.text)}</textarea>` : ''}
-    ${t ? `<section class="textPresetGroup" aria-label="Presets de texto"><h3>Presets para clips</h3><div class="textPresetGrid">${presetButtons}</div></section>` : ''}
     ${selected ? `<details id="elementOptions" class="elementOptions"${expandedElementOptions.has(selected.id) ? ' open' : ''}><summary>${t ? 'Estilo e posição' : 'Ajustes do ficheiro'}</summary><div class="opt">
-      <label>Rotação <input id="elementAngle" type="number" min="-360" max="360" step="1" value="${selected.rotation || 0}"> °</label>
-      <button id="elementCenter" class="btn small">Centrar no visor</button>` : ''}
+      ${t ? `<section class="textPresetGroup" aria-label="Presets de texto"><h3>Presets para clips</h3><div class="textPresetGrid">${presetButtons}</div></section>` : ''}
+      <label>Rotação <input id="elementAngle" type="number" min="-360" max="360" step="1" value="${selected.rotation || 0}"> °</label>` : ''}
     ${selected?.mediaId ? `<label>Tamanho <input id="imageSize" type="range" min="0.03" max="2" step="0.01" value="${selected.size}"></label>` : ''}
     ${selected?.mediaId ? `<button id="replaceMedia" class="btn small"${importingMedia ? ' disabled' : ''}>${importingMedia ? 'A carregar…' : 'Substituir ficheiro'}</button><input id="replacementFile" type="file" accept="image/*,video/*,.mov,.mp4,.webm,.mkv,.avi,.gif" hidden>` : ''}
     ${t ? `
     <div class="row swatches">${TEXT_COLORS.map((c) => `<button class="sw${c === t.color ? ' on' : ''}" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('')}
       <label class="sw pick" title="Outra cor"><input id="tColor" type="color" value="${t.color}"></label></div>
     <div class="seg s3">${[['outline', 'Contorno'], ['box', 'Caixa'], ['plain', 'Simples']].map(([v, n]) => `<button data-tstyle="${v}"${t.style === v ? ' class="on"' : ''}>${n}</button>`).join('')}</div>
-    <label>Tamanho <input id="tSize" type="range" min="0.02" max="0.25" step="0.001" value="${t.size}"> <span class="mono" id="tSizeV">${Math.round(t.size * 1000) / 10}</span></label>
     <div class="row tools">
       <div class="seg s3 icons">${['left', 'center', 'right'].map((a) => `<button data-talign="${a}" title="Alinhar ${{ left: 'à esquerda', center: 'ao centro', right: 'à direita' }[a]}"${t.align === a ? ' class="on"' : ''}>${ALIGN_ICONS[a]}</button>`).join('')}</div>
+      <span class="sizeCombo"><input id="tSize" list="tSizeList" type="number" min="2" max="30" step="0.5" value="${Math.round(t.size * 1000) / 10}" title="Tamanho do texto" aria-label="Tamanho do texto"><datalist id="tSizeList">${TEXT_SIZE_PRESETS.map((v) => `<option value="${v}">`).join('')}</datalist></span>
       <button id="tUppercase" class="btn small uppercaseToggle${t.uppercase ? ' on' : ''}" aria-label="Maiúsculas" aria-pressed="${!!t.uppercase}" title="Alternar maiúsculas">Aa</button>
     </div>
-    <div class="row fontRow"><select id="tFont" title="Letra">${Object.entries(FONTS).map(([k, [n]]) => `<option value="${k}"${t.font === k ? ' selected' : ''}>${n}</option>`).join('')}</select></div>
-    <div class="row pos">
+    <div class="row fontRow"><select id="tFont" title="Letra">${Object.entries(FONTS).map(([k, [n]]) => `<option value="${k}"${t.font === k ? ' selected' : ''}>${n}</option>`).join('')}</select></div>` : ''}
+    ${selected ? `<div class="row pos">
+      <button class="btn small" id="elementCenter" title="Centrar no visor">Centrar no visor</button>
+      ${t ? `
       <button class="btn small" data-tpos="cx" title="Centrar na horizontal">↔</button>
       <button class="btn small" data-tpos="cy" title="Centrar na vertical">↕</button>
       <button class="btn small" data-tpos="top" title="Em cima">Cima</button>
       ${st.layout === 'streamer' ? '<button class="btn small" data-tpos="split" title="Na divisão câmara/jogo">Divisão</button>' : ''}
-      <button class="btn small" data-tpos="bottom" title="Em baixo">Baixo</button>
-    </div>
-    <label class="check"><input id="tKeep" type="checkbox"${t.keep ? ' checked' : ''}> Manter nos próximos clips</label>` : ''}
+      <button class="btn small" data-tpos="bottom" title="Em baixo">Baixo</button>` : ''}
+    </div>` : ''}
     ${selected ? '</div></details>' : ''}
   </div>`;
 
-  o.querySelector('#addElement').addEventListener('click', () => { elementPanel = elementPanel ? '' : 'choose'; renderTextOpts(); });
   o.querySelector('#addText')?.addEventListener('click', addText);
-  o.querySelector('#showImages')?.addEventListener('click', () => { st.textSel = null; elementPanel = 'image'; renderTextOpts(); });
+  o.querySelector('#showImages')?.addEventListener('click', () => { st.textSel = null; elementPanel = elementPanel === 'image' ? '' : 'image'; renderTextOpts(); });
   bindImagePicker(o);
   o.querySelector('#elementOptions')?.addEventListener('toggle', e => {
     if (!e.target.isConnected) return;
@@ -2297,6 +2431,7 @@ function renderTextOpts() {
   o.querySelector('#replaceMedia')?.addEventListener('click', () => o.querySelector('#replacementFile').click());
   o.querySelector('#replacementFile')?.addEventListener('change', e => replaceLibraryFile(selected.mediaId, e.target.files[0]));
   o.querySelectorAll('[data-tid]').forEach((b) => b.addEventListener('click', () => selectText(b.dataset.tid, true)));
+  o.querySelectorAll('[data-tdel]').forEach((b) => b.addEventListener('click', (e) => { e.stopPropagation(); elementEditor?.removeById(b.dataset.tdel); }));
   if (!t) return;
   const ta = o.querySelector('#tText');
   ta.addEventListener('input', () => {
@@ -2319,7 +2454,7 @@ function renderTextOpts() {
     if (preset) set(preset.values);
   }));
   o.querySelector('#tUppercase').addEventListener('click', () => set({ uppercase: !t.uppercase }));
-  o.querySelector('#tSize').addEventListener('input', (e) => { t.size = +e.target.value; syncTextSize(); saveTexts(); });
+  o.querySelector('#tSize').addEventListener('input', (e) => { t.size = clamp(+e.target.value || 0, 2, 30) / 100; syncTextSize(); saveTexts(); });
   o.querySelector('#tFont').addEventListener('change', (e) => set({ font: e.target.value }));
   o.querySelectorAll('[data-tpos]').forEach((b) => b.addEventListener('click', () => {
     const halfH = (t._box?.h || 0.06) / 2, p = b.dataset.tpos;
@@ -2330,7 +2465,6 @@ function renderTextOpts() {
     else if (p === 'split') t.y = st.streamer.split;
     saveTexts();
   }));
-  o.querySelector('#tKeep').addEventListener('change', (e) => { t.keep = e.target.checked; saveTexts(); });
 }
 
 // ---------- templates (barra de cima): guardam tudo o que está montado ----------
@@ -2619,6 +2753,16 @@ async function restoreSession() {
 function normalizeElementTimes() {
   if (!st.dur) return;
   for (const e of orderedElements(st)) {
+    // Se o início ficou totalmente fora do novo clip (texto "mantido" ou template vindos de um
+    // clip bem mais longo), o clamp simples abaixo encolhia-o para uma fração de segundo mesmo
+    // no fim — "existe" no estado, mas impossível de ver a passar o vídeo normalmente. Nesse
+    // caso extremo reancora-se ao início, preservando a duração pretendida em vez da posição.
+    if ((e.in ?? 0) >= st.dur) {
+      const length = e.out != null ? clamp(e.out - e.in, .1, st.dur) : st.dur;
+      e.in = 0;
+      if (e.out != null) e.out = clamp(length, .1, st.dur);
+      continue;
+    }
     e.in = clamp(e.in ?? 0, 0, Math.max(0, st.dur - .1));
     if (e.out != null) e.out = clamp(e.out, Math.min(st.dur, e.in + .1), st.dur);
   }
@@ -3018,6 +3162,39 @@ function setCaption(v) {
 }
 setCaption(st.caption);
 
+// ---------- predefinições de legenda/hashtags (reaproveitar sem escrever de novo) ----------
+const captionPresets = () => loadJSON('sc.captionPresets', []);
+function renderCaptionPresets() {
+  const wrap = $('#ttPresets'), list = captionPresets();
+  wrap.innerHTML = list.map((p, i) => `<span class="capPreset">
+    <button type="button" class="btn small" data-apply-preset="${i}" title="${esc(p.text)}">${esc(p.name)}</button>
+    <button type="button" class="capPresetDel" data-del-preset="${i}" title="Apagar preset «${esc(p.name)}»" aria-label="Apagar preset ${esc(p.name)}">×</button>
+  </span>`).join('');
+  wrap.querySelectorAll('[data-apply-preset]').forEach((b) => b.addEventListener('click', () => {
+    const p = list[+b.dataset.applyPreset];
+    if (!p) return;
+    const cur = $('#ttCap').value.trim();
+    setCaption(cur ? `${cur}\n${p.text}` : p.text);
+    $('#ttCap').focus();
+  }));
+  wrap.querySelectorAll('[data-del-preset]').forEach((b) => b.addEventListener('click', () => {
+    list.splice(+b.dataset.delPreset, 1);
+    saveJSON('sc.captionPresets', list);
+    renderCaptionPresets();
+  }));
+}
+renderCaptionPresets();
+$('#ttPresetSaveBtn').addEventListener('click', () => {
+  const name = $('#ttPresetName').value.trim(), text = $('#ttCap').value.trim();
+  if (!name || !text) return;
+  const list = captionPresets();
+  list.push({ name, text });
+  saveJSON('sc.captionPresets', list);
+  $('#ttPresetName').value = '';
+  renderCaptionPresets();
+});
+$('#ttPresetName').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#ttPresetSaveBtn').click(); } });
+
 const ttSignal = (v) => { try { chrome.storage?.local?.set({ scTikTok: { ...v, at: Date.now() } }); } catch {} };
 let ttTab = null, ttId = '', ttOut = null;
 async function openTikTok() {
@@ -3077,7 +3254,7 @@ function setWhen(date) {
 function whenDate() { return new Date(`${$('#ttDate').value}T${$('#ttTime').value || '00:00'}`); }
 function checkWhen() {
   const at = ttDlg.dataset.when === 'at', d = whenDate(), dt = d - Date.now();
-  const err = !at ? '' : isNaN(d) ? 'Escolhe o dia e a hora.' : dt < TT_MIN_MS ? 'Tem de ser pelo menos daqui a 15 minutos.' : dt > TT_MAX_MS ? 'O TikTok só deixa agendar até 10 dias.' : '';
+  const err = !at ? '' : isNaN(d) ? 'Escolhe o dia e a hora.' : dt > TT_MAX_MS ? 'O TikTok só deixa agendar até 10 dias.' : '';
   $('#ttErr').textContent = err;
   $('#ttWhenTxt').textContent = at && !err ? d.toLocaleString('pt-PT', { weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) : '';
   const go = $('#ttGo');
@@ -3089,10 +3266,11 @@ function checkWhen() {
 }
 
 // Atalhos de horário: fica aceso o que corresponde ao dia/hora escolhidos (também se escritos à mão).
-let ttQuick1h = '';                      // o valor que o «+1 hora» pôs (muda com o relógio)
+const REL_MIN = { '15m': 15, '30m': 30, '45m': 45, '1h': 60 };   // atalhos relativos a "agora"
+let ttQuickRel = {};   // valor exato que cada atalho relativo pôs (não recalcula com o relógio a andar)
 function quickTarget(q) {
   const d = new Date();
-  if (q === '1h') { d.setTime(d.getTime() + 3600e3); return roundTo5(d); }
+  if (REL_MIN[q]) { d.setTime(d.getTime() + REL_MIN[q] * 60e3); return roundTo5(d); }
   const [h, m] = q.slice(-5).split(':').map(Number);
   if (q.startsWith('tom')) d.setDate(d.getDate() + 1);
   d.setHours(h, m, 0, 0);
@@ -3102,8 +3280,13 @@ function markQuick() {
   const at = ttDlg.dataset.when === 'at', cur = `${$('#ttDate').value}T${$('#ttTime').value}`;
   for (const b of ttDlg.querySelectorAll('[data-q]')) {
     const q = b.dataset.q;
-    const t = q === '1h' ? ttQuick1h : (() => { const d = quickTarget(q); return `${ymd(d)}T${hm(d)}`; })();
+    const t = REL_MIN[q] ? ttQuickRel[q] : (() => { const d = quickTarget(q); return `${ymd(d)}T${hm(d)}`; })();
     b.classList.toggle('on', at && t === cur);
+  }
+  for (const b of ttDlg.querySelectorAll('[data-ql]')) {
+    if (!lastPost) { b.classList.remove('on'); continue; }
+    const d = lastQuickTarget(b.dataset.ql);
+    b.classList.toggle('on', at && `${ymd(d)}T${hm(d)}` === cur);
   }
 }
 function setWhenMode(m) {
@@ -3115,7 +3298,7 @@ function setWhenMode(m) {
 ttDlg.querySelectorAll('[data-when]').forEach((b) => b.addEventListener('click', () => setWhenMode(b.dataset.when)));
 ttDlg.querySelectorAll('[data-q]').forEach((b) => b.addEventListener('click', () => {
   const d = quickTarget(b.dataset.q);
-  if (b.dataset.q === '1h') ttQuick1h = `${ymd(d)}T${hm(d)}`;
+  if (REL_MIN[b.dataset.q]) ttQuickRel[b.dataset.q] = `${ymd(d)}T${hm(d)}`;
   setWhenMode('at');
   setWhen(d);
 }));
@@ -3124,6 +3307,34 @@ $('#ttTime').addEventListener('input', checkWhen);
 $('#ttCap').addEventListener('input', () => setCaption($('#ttCap').value));
 $('#ttLastCaption').addEventListener('click', () => { setCaption(lastCaption()); $('#ttCap').focus(); });
 $('#ttCap').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); $('#ttGo').click(); } });
+
+// ---------- "último clip": referência para espaçar o próximo sem fazer contas ----------
+// A extensão nunca clica em Publicar/Agendar (é sempre o utilizador), por isso isto não é uma
+// confirmação do TikTok — é a hora até onde a extensão conseguiu preencher sozinha da última vez
+// (tiktok.js grava em chrome.storage.local quando chega ao fim sem erros).
+let lastPost = null;   // { at: ms, name, mode }
+function lastQuickTarget(q) { return roundTo5(new Date(lastPost.at + REL_MIN[q] * 60e3)); }
+function renderLastPost() {
+  const row = $('#ttLastRow');
+  if (!lastPost) { row.hidden = true; return; }
+  row.hidden = false;
+  const when = new Date(lastPost.at).toLocaleString('pt-PT', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  $('#ttLastTxt').textContent = `Último clip preenchido: ${when}` + (lastPost.name ? ` · ${lastPost.name}` : '');
+}
+function applyLastPost(v) {
+  lastPost = v?.at ? v : null;
+  renderLastPost();
+  markQuick();
+}
+ttDlg.querySelectorAll('[data-ql]').forEach((b) => b.addEventListener('click', () => {
+  if (!lastPost) return;
+  setWhenMode('at');
+  setWhen(lastQuickTarget(b.dataset.ql));
+}));
+try {
+  chrome.storage?.local?.get('scLastTikTok', (s) => applyLastPost(s?.scLastTikTok));
+  chrome.storage?.onChanged?.addListener((ch, area) => { if (area === 'local' && ch.scLastTikTok) applyLastPost(ch.scLastTikTok.newValue); });
+} catch {}
 
 // Abre o diálogo; resolve com {caption, when, date, time} ou null (cancelado).
 function askTikTok() {
@@ -3404,12 +3615,11 @@ elementEditor = createElementEditor({ st, video, preview,
   save: () => {
     const t = selText();
     if (t) saveJSON('sc.textStyle', Object.fromEntries(TEXT_STYLE_KEYS.map(k => [k, t[k]])));
-    saveJSON('sc.texts', st.texts.filter(x => x.keep).map(({ id, _box, ...rest }) => rest));
     saveSession();
   },
   addText, mediaItem: libItem, fmt,
 });
-if (DEV) globalThis.__editor = { st, exportClip, setLayout, setCropKey, addToLibrary, queueVideoFiles, materializeVideoFiles, addAudioTracks, libItem, previewMedia, addText, selectText, selectAudio, snapshot, applyTemplateSnap, elementEditor, renderFrame, encodeVideo, saveSession, updateTimeline, sourceToEdit, editToSource, editDuration, timelineDuration, askTikTok, finishTikTok };
+if (DEV) globalThis.__editor = { st, exportClip, setLayout, updateCropKey, addCropKeyAt, addToLibrary, queueVideoFiles, materializeVideoFiles, addAudioTracks, libItem, previewMedia, addText, selectText, selectAudio, snapshot, applyTemplateSnap, elementEditor, renderFrame, encodeVideo, saveSession, updateTimeline, sourceToEdit, editToSource, editDuration, timelineDuration, askTikTok, finishTikTok };
 
 // Abre no último formato usado (a primeira vez: Streamer).
 let lastLayout = null;

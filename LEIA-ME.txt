@@ -19,6 +19,9 @@ USAR
 - Ponto vermelho a piscar = está a gravar o buffer do ecrã (guarda os últimos ~120s).
   Serve de reserva se o modo live falhar ou a playlist Kick não tiver os segmentos pedidos.
 - Clica 15s / 30s / 45s / 60s / 120s (ou Alt+1 / Alt+2 / Alt+3 / Alt+4 / Alt+5) para guardar esse tempo para trás.
+  Podes clicar noutro botão de duração enquanto o clip anterior ainda está a processar — não
+  bloqueia, fica em fila (o painel mostra "N em fila") e sai um clip de cada vez, pela ordem dos
+  cliques. Só a gravação manual (● REC / «+») espera mesmo o processamento anterior acabar.
 - O botão «+» ao lado de cada duração começa um clip com até esse tempo de contexto e continua a gravar.
   Clica no contador vermelho (ou Alt+R) para terminar e abrir o clip no editor.
 - ● REC (ao lado do 15s, ou Alt+R): começa a gravar A PARTIR DE AGORA, durante o tempo que quiseres.
@@ -83,21 +86,32 @@ EDITOR PARA TIKTOK
   pela biblioteca. «+ Vídeo» anexa um ou vários clips ao fim da faixa principal, com o respetivo
   som, e aumenta imediatamente a duração da timeline. O novo segmento pode logo ser cortado,
   dividido ou removido. Para sobrepor um vídeo ao principal, usa
-  «Adicionar elemento» → «Ficheiro». «+ Música» cria uma faixa verde
+  «+ Ficheiro» em Elementos. «+ Música» cria uma faixa verde
   por baixo do vídeo. Arrasta o bloco para posicionar a música e as pegas das pontas para escolher
   o trecho; seleciona-o para ajustar volume (0–200%), entrada/saída suave, silenciar ou apagar.
   A pré-escuta acompanha o play/pausa e a exportação mistura todas as faixas com o som original.
   As faixas da timeline são compactas para mostrar mais camadas sem perder pegas fáceis de agarrar.
+  O nome de cada faixa fica fixo à esquerda ao fazer scroll horizontal, para nunca perderes de
+  vista a que corresponde cada bloco numa timeline mais longa.
   Enquanto os metadados são lidos aparece uma faixa skeleton animada com a fase atual; depois o
   clip entra imediatamente na timeline, sem esperar por conversões. A consolidação fica para a
   exportação: clips com codec, resolução, FPS e áudio compatíveis são unidos sem recodificar;
   formatos diferentes usam automaticamente a conversão segura nessa altura e podem demorar mais.
-- TEXTOS (qualquer formato): «Adicionar elemento» → «Texto» (ou T) põe um texto no resultado já pronto a escrever.
+- TEXTOS (qualquer formato): «+ Texto» em Elementos (ou T) põe um texto no resultado já pronto a escrever.
   No resultado: arrasta para mover (encaixa no centro, nos terços e na divisão câmara/jogo; Alt
-  desliga o encaixe), roda do rato = tamanho, duplo clique = editar. No painel: cor, estilo
-  (Contorno / Caixa / Simples), tamanho, alinhamento do texto, letra e botões rápidos de posição
-  (↔ centrar, ↕ centrar, Cima, Divisão, Baixo). Enter = nova linha; linhas compridas partem sozinhas.
-  O próximo texto usa o último estilo. «Manter nos próximos clips» deixa esse texto fixo.
+  desliga o encaixe), roda do rato = tamanho, duplo clique = editar. Só a caixa de texto fica
+  sempre visível; carrega em «Estilo e posição» para abrir cor, estilo (Contorno / Caixa /
+  Simples), tamanho, alinhamento, letra e os botões rápidos de posição (Centrar no visor, ↔
+  centrar, ↕ centrar, Cima, Divisão, Baixo). O tamanho do texto escreve-se ou escolhe-se numa
+  lista (como a caixa de tamanho de letra do Word), ao lado do botão Aa de maiúsculas.
+  O próximo texto usa o último estilo. Para repetir o mesmo texto em vários clips, usa um template
+  (ver TEMPLATES abaixo) em vez de os ires recriando um a um.
+  A lista de Elementos mostra as camadas de cima para baixo (a de cima tapa as outras); arrasta o
+  nome de uma camada para cima/baixo para a reordenar. «↑»/«↓» na barra do elemento selecionado
+  no visor trazem-no para a frente ou mandam-no para trás de todas as outras de uma vez. Cada
+  linha da lista tem um ✕ à direita para apagar esse elemento diretamente, sem ter de o selecionar
+  primeiro. Duplicar um elemento (Ctrl+D) põe a cópia logo a seguir no tempo, nunca em cima da
+  original.
 - TEMPLATES (barra de cima): «Guardar novo» abre um diálogo para criar um template com TUDO o que está montado (formato, câmara/jogo, altura,
   imagem/vídeo e o tamanho/posição, moldura Vertical, textos, imagens livres e faixas de áudio com os respetivos ajustes).
   Escolhe-o na lista para aplicar; os tempos dos elementos mantêm a distância ao fim do clip, adaptando-se à duração
@@ -109,7 +123,10 @@ EDITOR PARA TIKTOK
   apagar cada template. Apagar pede confirmação na própria linha.
 - Barra de tempo: arrasta as pegas brancas para cortar início e fim. Clica numa faixa para selecionar
   o segmento; Ctrl+B divide-o no cursor e Delete remove-o. A exportação junta os segmentos restantes,
-  sem intervalos vazios, e mantém o áudio sincronizado.
+  sem intervalos vazios, e mantém o áudio sincronizado. Depois de dividir (ou duplicar) em vários
+  segmentos, arrasta qualquer um deles para outra posição na barra para mudar a ordem em que o
+  clip fica montado — o vídeo passa mesmo a começar (ou continuar) por esse troço, tanto a ver no
+  editor como na exportação.
 - Formatos (1080x1920):
   · Streamer (abre por omissão na primeira vez; depois abre no último formato usado) — câmara em cima; arrasta a divisão diretamente no resultado. Em baixo escolhes:
       - Jogo: a parte do clip que vai para baixo (caixa azul no original).
@@ -125,10 +142,12 @@ EDITOR PARA TIKTOK
     (aparece "câmara deste canal" em baixo). Num canal novo usa a última que usaste.
     Biblioteca: o "+" adiciona vídeos/imagens que ficam guardados na extensão para as próximas vezes
     (imagens, GIFs e vídeos; converte para MP4 H.264 quando necessário).
-  · Vertical — moldura 9:16. Para a moldura se mover durante o clip: vai a outro instante e arrasta
-    outra vez; cada sítio fica marcado (◆ na barra) e a moldura desliza suavemente entre eles.
-    Os ◆ arrastam-se na barra para mudar o instante (não passam por cima dos vizinhos); clique =
-    ir para lá; botão direito (ou duplo clique) = apagar.
+  · Vertical — moldura 9:16. Arrastar/fazer zoom só ajusta a posição: fica fixa em todo o clip,
+    nunca cria pontos novos sozinho por estares a meio do vídeo. Para a moldura se mover durante o
+    clip, carrega em «◆ Posição aqui» (no painel «Posições da moldura») no instante onde queres o
+    próximo ponto e ajusta-o; cada sítio fica marcado (◆ na barra) e a moldura desliza suavemente
+    entre eles. Os ◆ arrastam-se na barra para mudar o instante (não passam por cima dos
+    vizinhos); clique = ir para lá; botão direito (ou duplo clique) = apagar.
   · Desfocado — vídeo ao centro com o fundo desfocado. Em «Zoom do vídeo», usa o controlo
     ou os botões − / + para aproximar até 400%. Também podes usar a roda do rato sobre o vídeo
     no resultado e arrastar para enquadrar. «Repor enquadramento» volta a 100% e centra o vídeo.
@@ -139,8 +158,14 @@ EDITOR PARA TIKTOK
   um diálogo para preencheres, enquanto esperas:
     · Descrição (legenda + #hashtags): começa vazia em cada clip e não faz parte dos templates.
       «Aplicar última» recupera a última descrição confirmada para o TikTok, só quando quiseres.
-    · Quando: «Publicar já» ou «Agendar» com dia e hora (atalhos: +1 hora, Hoje/Amanhã 12:00 e
-      18:00). Lembra-se da última hora. O TikTok só aceita de 15 minutos a 10 dias à frente.
+      Predefinições: escreve os hashtags que repetes (ex.: por jogo) e carrega em «+ Guardar
+      preset» com um nome; depois é só carregar no preset para os acrescentar à descrição (o × no
+      preset apaga-o). Ficam guardados na extensão, não por clip.
+    · Quando: «Publicar já» ou «Agendar» com dia e hora (atalhos: +15/30/45 min, +1 hora, Amanhã
+      12:00 e 18:00). Lembra-se da última hora. O TikTok aceita agendar até 10 dias à frente.
+      Depois de um clip ficar pronto para o TikTok, aparece «Último clip preenchido» com atalhos
+      próprios (+15/30 min, +1 hora) que contam a partir DESSE clip em vez de agora — útil para
+      espaçar vários clips seguidos sem fazer contas.
   «Abrir no TikTok» (ou Ctrl+Enter) abre o TikTok Studio (precisas de sessão iniciada neste
   browser). Quando o vídeo fica pronto a extensão põe lá o vídeo, a descrição e — se agendaste —
   escolhe «Agendar», o dia e a hora. Tu só confirmas e carregas no botão final (a extensão nunca

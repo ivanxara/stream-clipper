@@ -179,8 +179,12 @@ export function planCut(packets, { abs, from, to }) {
   const fromAbs = abs ? from : start + from;
   const toAbs = abs ? to : start + to;
   const keys = packets.filter((p) => p.key).map((p) => p.t).sort((a, b) => a - b);
-  let k = keys[0] ?? start;
+  if (!keys.length) throw new Error('Não encontrei nenhuma imagem-chave no vídeo descarregado.');
+  let k = keys[0];
   for (const kt of keys) if (kt <= fromAbs + 0.05) k = kt;
+  // Sem imagem-chave perto do início pedido, o corte ficaria mais curto do que o pedido — mais
+  // vale falhar (e cair na gravação) do que entregar um clip silenciosamente incompleto.
+  if (k > fromAbs + 0.5) throw new Error('Não descarreguei vídeo suficiente antes do início pedido.');
   if (!(toAbs - k > 0.5)) throw new Error('Trecho demasiado curto no que foi descarregado.');
   // O ffmpeg compara o -ss com o DTS, que nos keyframes com B-frames fica um pouco antes do PTS:
   // com margem de 0,5s o keyframe k entra de certeza (e nada antes dele, que não é keyframe).
