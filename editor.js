@@ -206,11 +206,27 @@ function drawMedia(ctx, m, dx, dy, dw, dh) {
 }
 
 // t = tempo da fonte (moldura/câmara); editTime = tempo da régua (textos e imagens).
-function renderFrame(ctx, src, sw, sh, t, W, H, media, elementMedia, editTime = t) {
+// Retângulo (em pixéis da fonte) que um ficheiro de «+ Vídeo» ocupa dentro do quadro da fonte
+// (o ffmpeg/preview põe-no ao centro com barras pretas).
+function containRect(sw, sh, w, h) {
+  const k = Math.min(sw / w, sh / h), cw = w * k, ch = h * k;
+  return { x: (sw - cw) / 2, y: (sh - ch) / 2, w: cw, h: ch };
+}
+// Tempos da fonte que vêm de outros ficheiros (preenchido por materializeVideoFiles).
+function foreignFit(t, sw, sh) {
+  const f = st.foreign?.find(x => t >= x.start - 0.001 && t < x.end);
+  return f ? containRect(sw, sh, f.w, f.h) : null;
+}
+// fit: onde está o conteúdo real quando a fonte é um ficheiro de «+ Vídeo»; na moldura Vertical
+// mostra-se esse vídeo inteiro (a moldura é do clip principal e cortava-o).
+function renderFrame(ctx, src, sw, sh, t, W, H, media, elementMedia, editTime = t, fit = foreignFit(t, sw, sh)) {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, W, H);
   if (st.layout === 'original') {
     drawFramedVideo(ctx, src, sw, sh, W, H);
+  } else if (st.layout === 'crop' && fit) {
+    const k = Math.min(W / fit.w, H / fit.h), dw = fit.w * k, dh = fit.h * k;
+    ctx.drawImage(src, fit.x, fit.y, fit.w, fit.h, (W - dw) / 2, (H - dh) / 2, dw, dh);
   } else if (st.layout === 'crop') {
     drawSrc(ctx, src, sw, sh, cropAt(t), 9 / 16, 0, 0, W, H);
   } else if (st.layout === 'streamer') {
@@ -434,7 +450,8 @@ function loopPreview() {
     if (pw > 0 && (preview.width !== pw || preview.height !== ph)) { preview.width = pw; preview.height = ph; }
     const source = part?.mediaId ? fittedSequenceSource(el) : el;
     const sw = part?.mediaId ? st.srcW : el.videoWidth, sh = part?.mediaId ? st.srcH : el.videoHeight;
-    renderFrame(pctx, source, sw, sh, part?.mediaId ? 0 : el.currentTime, preview.width, preview.height, () => previewMediaFor(st.streamer.mediaId), null, currentTimelineTime());
+    renderFrame(pctx, source, sw, sh, part?.mediaId ? 0 : el.currentTime, preview.width, preview.height, () => previewMediaFor(st.streamer.mediaId), null, currentTimelineTime(),
+      part?.mediaId ? containRect(sw, sh, el.videoWidth, el.videoHeight) : null);
   }
   elementEditor?.update();
   updateSplitUi();
@@ -2228,7 +2245,9 @@ async function materializeVideoFiles() {
     // Onde começa cada ficheiro na fonte nova.
     const offset = new Map();
     let cursor = oldDuration;
-    mediaIds.forEach((id, i) => { offset.set(id, cursor); cursor += media[i].dur; });
+    const foreign = [];
+    mediaIds.forEach((id, i) => { offset.set(id, cursor); foreign.push({ start: cursor, end: cursor + media[i].dur, w: media[i].w, h: media[i].h }); cursor += media[i].dur; });
+    st.foreign = foreign;
     st.parts = cleanParts(oldParts.map(p => p.mediaId
       ? { start: offset.get(p.mediaId) + p.start, end: Math.min(st.dur, offset.get(p.mediaId) + p.end) }
       : { start: p.start, end: p.end }));
@@ -3037,6 +3056,7 @@ async function loadClip(blob, name, channel, fromStore = false, initialRange = n
     const known = restoreCam();                     // depois de saber o tamanho real do vídeo
     st.dur = Math.min(st.dur, video.duration || st.dur);
     st.parts = [{ start: 0, end: st.dur }];
+    st.foreign = [];
     if (initialRange && Number.isFinite(initialRange.start) && Number.isFinite(initialRange.end)) {
       const rangeStart = clamp(initialRange.start, 0, st.dur);
       const rangeEnd = clamp(initialRange.end, rangeStart + 0.05, st.dur);
