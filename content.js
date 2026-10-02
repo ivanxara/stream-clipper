@@ -1,13 +1,16 @@
 // Stream Clipper — content script
-// Mantém um buffer circular dos últimos ~120s do <video> principal da página,
-// gravado em segmentos curtos (cada um é um ficheiro WebM completo).
-// Ao clicar, junta os segmentos certos (via ffmpeg.wasm num iframe da extensão).
+// Mantém um buffer dos últimos ~140s do <video> principal da página com UM MediaRecorder contínuo
+// (keyframe de 1 em 1 s). Os bocados são lidos em streaming (webmbuf.js) e guardados bloco a bloco;
+// um clip é reconstruído a partir do keyframe certo, sem juntas entre gravadores diferentes.
+// Ao clicar, o processador (ffmpeg.wasm num iframe da extensão) converte-o para MP4.
 (() => {
   if (window.__streamClipper) return;
   window.__streamClipper = true;
 
-  const SEG_MS = 8000;          // menos reinícios do codificador, mantendo o buffer circular
-  const KEEP_MS = 140000;       // histórico para clips de 120s e fallback do modo live
+  const KEEP_MS = 140000;        // histórico para clips de 120s e fallback do modo live
+  const KEY_MS = 1000;           // intervalo pedido entre keyframes (define onde um clip pode começar)
+  const SLICE_MS = 250;          // o MediaRecorder entrega dados a este ritmo (o fim do clip fica preciso)
+  const FORCE_ROTATE_MS = 12000; // se o browser ignorar o KEY_MS e não houver keyframes, recomeça
   const DURATIONS = [15, 30, 45, 60, 120];
   const MIME_CANDIDATES = [
     'video/webm;codecs=h264,opus',   // Chrome: H.264 -> dá MP4 sem re-encode
@@ -16,15 +19,16 @@
     'video/webm;codecs=vp9,opus',
     'video/webm',
   ];
+  const Webm = self.StreamClipperWebm;
 
   const state = {
     enabled: false,
     video: null,
     stream: null,
     mime: null,
-    segments: [],       // {start, end, blob, done, rec, donePromise}
-    current: null,
-    timer: null,
+    runs: [],           // gravações contínuas (normalmente 1; mais só depois de uma troca de resolução)
+    current: null,      // a run a gravar agora
+    holds: 0,           // clips à espera de ler o buffer: enquanto > 0 não se apaga nada
     seekListeners: [],
     busy: false,
     error: null,
@@ -40,13 +44,15 @@
     return MIME_CANDIDATES.find((m) => !state.triedCodecs.has(m) && window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
   }
 
+  // Bitrate generoso: o clip ainda vai ser recodificado no editor, por isso convém partir de boa
+  // qualidade (≈0,15 bit/píxel; 1080p60 ≈ 19 Mbps, 1080p30 ≈ 9 Mbps, 720p30 ≈ 6 Mbps).
   function recorderOptions(stream, mime) {
     const track = stream.getVideoTracks()[0];
     const settings = track?.getSettings?.() || {};
     const width = settings.width || state.video?.videoWidth || 1280;
     const height = settings.height || state.video?.videoHeight || 720;
     const fps = settings.frameRate || 30;
-    const videoBitsPerSecond = Math.min(18_000_000, Math.max(3_000_000, Math.round(width * height * fps * 0.13)));
+    const videoBitsPerSecond = Math.min(22_000_000, Math.max(6_000_000, Math.round(width * height * fps * 0.15)));
     return { mimeType: mime, videoBitsPerSecond, audioBitsPerSecond: 192_000 };
   }
 
@@ -61,108 +67,152 @@
     return best;
   }
 
-  // ---------- gravação por segmentos ----------
-  function startSegment() {
-    const seg = { start: null, end: null, blob: null, done: false, chunks: [], mime: state.mime, gen: bufferGen };
+  // ---------- gravação contínua ----------
+  // Uma run = um MediaRecorder do princípio ao fim. Os tempos dos blocos (t, ms) são do próprio
+  // WebM; offset converte para o relógio da página (wall = t + offset), medido pelo menor atraso
+  // entre um bloco ser gravado e chegar cá (latência do codificador + timeslice).
+  let bufferGen = 0;
+  function startRun() {
+    const run = {
+      rec: null, mime: state.mime, gen: bufferGen, header: null, blocks: [], parser: null,
+      offset: Infinity, firstKeyT: null, lastT: null, lastKeyT: null, startedAt: now(), endWall: null,
+      width: state.video?.videoWidth || 0, height: state.video?.videoHeight || 0,
+      queue: Promise.resolve(), waiters: [], stopped: null,
+    };
+    run.firstKey = new Promise((res) => { run.firstKeyWaiter = res; });
+    run.parser = Webm.createParser((b) => {
+      if (b.video && b.key) {
+        if (run.firstKeyT == null) { run.firstKeyT = b.t; run.firstKeyWaiter(); }
+        run.lastKeyT = b.t;
+      }
+      // Antes do 1º keyframe de vídeo nada é utilizável (o clip tem de começar num keyframe).
+      if (run.firstKeyT == null) return;
+      run.blocks.push(b);
+      if (b.video && (run.lastT == null || b.t > run.lastT)) run.lastT = b.t;
+    });
+    run.header = run.parser.header;
     let rec;
+    const options = { ...recorderOptions(state.stream, state.mime), videoKeyFrameIntervalDuration: KEY_MS };
     try {
-      rec = new MediaRecorder(state.stream, recorderOptions(state.stream, state.mime));
+      rec = new MediaRecorder(state.stream, options);
     } catch (e) {
-      state.triedCodecs.add(seg.mime);
+      state.triedCodecs.add(run.mime);
       fail('Não foi possível iniciar a gravação: ' + e.message);
       return null;
     }
-    seg.rec = rec;
-    seg.startedPromise = new Promise((res) => { rec.onstart = () => { seg.start = now(); res(); }; });
-    seg.donePromise = new Promise((res) => {
-      rec.onstop = () => { seg.end ??= now(); finalize(seg); res(seg); };
-    });
+    run.rec = rec;
+    run.stopped = new Promise((res) => { rec.onstop = () => res(); });
     rec.ondataavailable = (e) => {
-      if (e.data?.size && seg.chunks) {
-        seg.chunks.push(e.data);
-        seg.dataAt = now();
-        if (seg.gen === bufferGen) { state.lastDataAt = seg.dataAt; state.error = null; }
-      }
+      if (!e.data?.size) return;
+      const arrived = now();
+      run.queue = run.queue.then(async () => {
+        const bytes = new Uint8Array(await e.data.arrayBuffer());
+        try { run.parser.push(bytes); } catch (err) {
+          if (run.gen === bufferGen && run === state.current) fail('Gravação ilegível: ' + err.message);
+          return;
+        }
+        if (run.lastT != null) run.offset = Math.min(run.offset, arrived - run.lastT);
+        if (run.blocks.length && run.gen === bufferGen) { state.lastDataAt = arrived; state.error = null; }
+      }).catch(() => {}).then(() => {
+        for (const f of run.waiters.splice(0)) f();
+      });
     };
     rec.onerror = (e) => {
-      if (seg.gen !== bufferGen) return;
-      state.triedCodecs.add(seg.mime);
+      if (run.gen !== bufferGen) return;
+      state.triedCodecs.add(run.mime);
       fail('Erro na gravação: ' + (e.error?.message || e));
     };
     try {
-      rec.start(1000);   // timeslice: os dados vão chegando, mesmo que o onstop se atrase
+      rec.start(SLICE_MS);
     } catch (e) {
-      state.triedCodecs.add(seg.mime);
+      state.triedCodecs.add(run.mime);
       fail('Não foi possível iniciar a gravação: ' + e.message);
       return null;
     }
-    seg.start = now();   // o onstart afina isto, mas não dependemos dele
-    state.segments.push(seg);
-    return seg;
+    state.runs.push(run);
+    return run;
   }
 
-  function finalize(seg) {
-    if (seg.done) return;
-    seg.blob = new Blob(seg.chunks || [], { type: seg.mime.split(';')[0] });
-    seg.chunks = null;
-    seg.done = true;
+  // Relógio da página <-> tempo do WebM de uma run. Antes de haver medida, estima pelo arranque.
+  const runOffset = (run) => (Number.isFinite(run.offset) ? run.offset : run.startedAt - (run.firstKeyT ?? 0));
+  const wallOf = (run, t) => t + runOffset(run);
+  const tOf = (run, wall) => wall - runOffset(run);
+
+  // Pede ao MediaRecorder o que tiver pendente e espera que isso seja lido (o fim do clip fica
+  // exatamente no clique). Numa run parada, espera só pelo fim da leitura.
+  function flushRun(run, ms = 1500) {
+    if (run.rec?.state !== 'recording') return Promise.race([run.queue, sleep(ms)]);
+    const done = new Promise((res) => run.waiters.push(res));
+    try { run.rec.requestData(); } catch {}
+    return Promise.race([done, sleep(ms)]).then(() => Promise.race([run.queue, sleep(ms)]));
   }
 
-  // Espera que o segmento feche; se o browser nunca disparar onstop, usa o que já chegou.
-  function waitDone(seg, ms = 4000) {
-    return Promise.race([seg.donePromise, sleep(ms).then(() => { finalize(seg); return seg; })]);
+  function stopRun(run) {
+    if (!run?.rec) return Promise.resolve();
+    run.endWall ??= now();
+    if (run.rec.state !== 'inactive') { try { run.rec.stop(); } catch {} }
+    return Promise.race([run.stopped, sleep(3000)]).then(() => Promise.race([run.queue, sleep(3000)]));
   }
 
-  // Rotações em fila: a automática (4s) e a do clique nunca correm ao mesmo tempo.
+  // Troca de run (mudou a resolução, ou o browser não está a dar keyframes): a nova começa antes
+  // de a antiga parar, e a antiga fica guardada para clips que a atravessem.
   let rotating = Promise.resolve();
   function rotate() {
     const gen = bufferGen;
-    const run = () => gen === bufferGen ? doRotate() : null;
-    const p = rotating.then(run, run);
+    const p = rotating.then(async () => {
+      if (gen !== bufferGen || !state.stream) return;
+      const old = state.current;
+      const next = startRun();
+      if (!next) return;
+      state.current = next;
+      await Promise.race([next.firstKey, sleep(3000)]);
+      if (gen !== bufferGen) return;
+      if (old) {
+        old.endWall = next.firstKeyT != null ? wallOf(next, next.firstKeyT) : now();
+        stopRun(old);
+      }
+      prune();
+    });
     rotating = p.catch(() => {});
     return p;
   }
 
-  // Começa um segmento novo e só depois pára o anterior (sobreposição mínima, sem buracos).
-  async function doRotate() {
-    if (!state.stream) return null;
-    const old = state.current;
-    const next = startSegment();
-    state.current = next;
-    if (next) await Promise.race([next.startedPromise, sleep(1500)]);
-    if (next && next.gen !== bufferGen) return old;
-    if (old && old.rec.state !== 'inactive') {
-      old.end = now();
-      try { old.rec.stop(); } catch { finalize(old); }
-    } else if (old && old.end == null) {
-      old.end = now();
-      finalize(old);
-    }
-    prune();
-    return old;
-  }
-
+  // Apaga o que já não cabe no histórico. Dentro da run, só se corta num keyframe de vídeo (o clip
+  // mais antigo possível tem de começar num). Nunca com clips à espera de ler o buffer.
   function prune() {
+    if (state.holds > 0) return;
     const limit = now() - KEEP_MS;
-    state.segments = state.segments.filter((s) => s === state.current || (s.end ?? s.start) > limit);
+    state.runs = state.runs.filter((r) => r === state.current || (r.endWall ?? now()) > limit);
+    for (const run of state.runs) {
+      if (!run.blocks.length) continue;
+      const tLimit = tOf(run, limit);
+      let cut = 0;
+      for (let i = 0; i < run.blocks.length; i++) {
+        const b = run.blocks[i];
+        if (b.t > tLimit) break;
+        if (b.video && b.key) cut = i;
+      }
+      if (cut > 0) run.blocks.splice(0, cut);
+    }
   }
 
-  function scheduleRotation() {
-    clearInterval(state.timer);
-    if (state.enabled && state.stream) state.timer = setInterval(() => rotate().catch((e) => fail(e.message)), SEG_MS);
+  // Manutenção periódica (no tick): apaga o que é velho e, se o browser não estiver a dar
+  // keyframes (ignora videoKeyFrameIntervalDuration), recomeça a run para haver pontos de corte.
+  function maintainBuffer() {
+    prune();
+    const run = state.current;
+    if (!run || run.lastT == null || run.lastKeyT == null || state.holds > 0) return;
+    if (run.lastT - run.lastKeyT > FORCE_ROTATE_MS) rotate().catch((e) => fail(e.message));
   }
 
-  let bufferGen = 0;
   function stopBuffer() {
     if (manual.rec) stopManual(false);
     bufferGen++;
-    clearInterval(state.timer);
-    state.timer = null;
-    for (const [video, type, listener] of state.seekListeners) video.removeEventListener(type, listener);
+    for (const [target, type, listener] of state.seekListeners) target.removeEventListener(type, listener);
     state.seekListeners = [];
-    for (const s of state.segments) if (s.rec && s.rec.state !== 'inactive') { try { s.rec.stop(); } catch {} }
+    for (const r of state.runs) stopRun(r);
     for (const track of state.stream?.getTracks() || []) track.stop();
-    state.segments = [];
+    state.runs = [];
     state.current = null;
     state.stream = null;
     state.video = null;
@@ -175,6 +225,7 @@
     state.retryAt = now() + 10000;
     if (!retry) state.triedCodecs.clear();
     state.error = null;
+    if (!Webm) return fail('Falta o leitor de WebM (recarrega a extensão).');
     state.mime = pickMime();
     if (!state.mime) return fail('Não foi possível gravar com os formatos disponíveis neste browser.');
     let stream;
@@ -204,37 +255,41 @@
       if (state.stream !== stream || !state.enabled) return;
       if (Math.abs(video.currentTime - seekRef) < 2) return;
       seekRef = video.currentTime;
-      resetSegments();   // instantâneo: recomeça já, não espera pelo 'seeked'
+      resetRuns();   // instantâneo: recomeça já, não espera pelo 'seeked'
     };
-    video.addEventListener('timeupdate', trackTime);
-    video.addEventListener('seeking', videoSeeking);
-    state.seekListeners = [[video, 'timeupdate', trackTime], [video, 'seeking', videoSeeking]];
+    // Mudou a resolução (qualidade automática do player): run nova, a antiga fica para clips.
+    const resized = () => {
+      if (state.stream !== stream || !state.enabled || !state.current) return;
+      if (video.videoWidth === state.current.width && video.videoHeight === state.current.height) return;
+      rotate().catch((e) => fail(e.message));
+    };
     // Se as faixas mudarem depois (troca de fonte), recomeça o buffer.
     let t;
     const restart = () => {
       clearTimeout(t);
       t = setTimeout(() => {
         if (state.stream !== stream || !state.enabled || manual.rec) return;
-        resetSegments();
+        resetRuns();
       }, 1500);
     };
+    video.addEventListener('timeupdate', trackTime);
+    video.addEventListener('seeking', videoSeeking);
+    video.addEventListener('resize', resized);
     stream.addEventListener('addtrack', restart);
     stream.addEventListener('removetrack', restart);
-    state.current = startSegment();
-    scheduleRotation();
+    state.seekListeners = [[video, 'timeupdate', trackTime], [video, 'seeking', videoSeeking], [video, 'resize', resized],
+      [stream, 'addtrack', restart], [stream, 'removetrack', restart]];
+    state.current = startRun();
     render();
   }
 
   // Descarta o buffer e recomeça já a gravar no mesmo stream.
-  function resetSegments() {
+  function resetRuns() {
     if (!state.stream) return;
     bufferGen++;
-    clearInterval(state.timer);
-    state.timer = null;
-    for (const s of state.segments) if (s.rec && s.rec.state !== 'inactive') { try { s.rec.stop(); } catch {} }
-    state.segments = [];
-    state.current = state.stream.getVideoTracks().some((t) => t.readyState === 'live') ? startSegment() : null;
-    if (state.current) scheduleRotation();
+    for (const r of state.runs) stopRun(r);
+    state.runs = [];
+    state.current = state.stream.getVideoTracks().some((t) => t.readyState === 'live') ? startRun() : null;
     render();
   }
 
@@ -258,14 +313,61 @@
     });
   }
 
+  // Intervalo [início, fim] de cada run no relógio da página (uma run acaba onde a seguinte começa).
+  function runSpan(run, i, runs) {
+    if (run.lastT == null || !run.blocks.length) return null;
+    const next = runs[i + 1];
+    const start = wallOf(run, run.blocks[0].t);
+    let end = wallOf(run, run.lastT);
+    if (run.endWall != null) end = Math.min(end, run.endWall);
+    if (next?.firstKeyT != null) end = Math.min(end, wallOf(next, next.firstKeyT));
+    return end > start ? { start, end } : null;
+  }
+
   function bufferedSeconds() {
-    // Só conta dados recebidos; um MediaRecorder ativo pode nunca produzir imagem.
-    const total = state.segments.reduce((sum, s, i, all) => {
-      if (!s.blob?.size && !s.chunks?.some((b) => b.size)) return sum;
-      const end = Math.min(s.end ?? s.dataAt ?? s.start, all[i + 1]?.start ?? Infinity);
-      return sum + Math.max(0, end - Math.max(s.start, now() - KEEP_MS));
-    }, 0);
+    const limit = now() - KEEP_MS;
+    let total = 0;
+    state.runs.forEach((run, i, all) => {
+      const s = runSpan(run, i, all);
+      if (s) total += Math.max(0, s.end - Math.max(s.start, limit));
+    });
     return Math.min(KEEP_MS, total) / 1000;
+  }
+
+  // Constrói as partes (WebM contínuos, cada um a começar num keyframe) que cobrem
+  // [endWall − seconds, endWall]. Normalmente é uma só; mais só se o clip atravessar uma troca de run.
+  async function buildParts(runs, seconds, endWall) {
+    await Promise.all(runs.map((r) => flushRun(r)));
+    const fromWall = endWall - seconds * 1000;
+    const parts = [];
+    runs.forEach((run, i) => {
+      const span = runSpan(run, i, runs);
+      if (!span) return;
+      const a = Math.max(fromWall, span.start), z = Math.min(endWall, span.end);
+      if (z - a < 50) return;
+      const tFrom = tOf(run, a), tTo = Math.min(tOf(run, z), run.lastT);
+      const blocks = run.blocks;
+      // Último keyframe de vídeo até ao início pedido (o clip fica no máximo ~1 s mais longo).
+      let k = -1;
+      for (let j = 0; j < blocks.length; j++) {
+        const b = blocks[j];
+        if (b.t > tFrom + 20 && k >= 0) break;
+        if (b.video && b.key) k = j;
+      }
+      if (k < 0) return;
+      const keyT = blocks[k].t;
+      if (tTo - keyT < 50) return;
+      const picked = [];
+      for (let j = k; j < blocks.length; j++) {
+        const b = blocks[j];
+        if (b.t < keyT) continue;          // áudio de antes do keyframe
+        if (b.t > tTo + 1) { if (b.video) break; continue; }
+        picked.push(b);
+      }
+      const blob = new Blob(Webm.buildWebm(run.header, picked, keyT), { type: 'video/webm' });
+      parts.push({ blob, outpoint: (tTo - keyT) / 1000, h264: /h264|avc1/.test(run.mime || ''), width: run.width, height: run.height });
+    });
+    return parts;
   }
 
   // ---------- criar o clip ----------
@@ -282,18 +384,19 @@
     if (!useServer && !state.stream) return toast('Nenhum vídeo a gravar ainda.');
     // O editor abre já (o browser só deixa abrir abas no instante do clique/tecla) e recebe o clip
     // quando estiver pronto. Se a aba for bloqueada, o clip é guardado diretamente.
-    const editor = openEditorTab('#pending');
+    // O id liga esta aba a este clip: se a mensagem não chegar, o editor procura-o no IndexedDB
+    // pelo id (e não abre por engano o clip de outro clique que ainda estava na fila).
+    const clipId = crypto.randomUUID();
+    const editor = openEditorTab('#pending=' + clipId);
     const clickTime = now();
-    // Guarda as referências antes da descarga: o buffer pode rodar ou ser reiniciado entretanto.
-    const snapshot = state.segments.slice();
-    const snapshotGen = bufferGen;
-    // Fecha o segmento atual exatamente agora (fica como reserva); não se espera por isto
-    // antes do modo live, para a posição do player ser lida no instante do clique.
-    const rotated = state.stream ? rotate().then(scheduleRotation) : Promise.resolve();
-    rotated.catch(() => {});
-    const task = { seconds, useServer, editor, clickTime, snapshot, snapshotGen, rotated };
+    // Guarda as runs do instante do clique e impede que o buffer apague o que este clip vai usar
+    // enquanto espera (modo live, fila de clips…). As runs continuam a crescer; o corte é pelo tempo.
+    const snapshot = state.runs.slice();
+    state.holds++;
+    const task = { seconds, useServer, editor, clickTime, snapshot, clipId };
     if (state.busy) {
       clipQueue.push(task);
+      editor?.send({ __scEd: 'progress', text: 'Na fila: à espera que o clip anterior termine…', clipId });
       // O "· N em fila" no render() já mostra a posição; o toast só confirma o clique.
       toast(`Clip de ${seconds}s registado`);
       return;
@@ -301,8 +404,11 @@
     runClip(task);
   }
 
-  async function runClip({ seconds, useServer, editor, clickTime, snapshot, snapshotGen, rotated }) {
+  async function runClip({ seconds, useServer, editor, clickTime, snapshot, clipId }) {
+    let held = true;
+    const release = () => { if (held) { held = false; state.holds = Math.max(0, state.holds - 1); } };
     state.busy = true;
+    activeEditor = editor ? { editor, clipId, last: '' } : null;
     render('A preparar clip de ' + seconds + 's…');
     try {
       let job = null, serverError = null;
@@ -310,6 +416,7 @@
         try {
           const r = await server.clip(seconds, { onProgress: (t) => render(t), video: state.video || findMainVideo() });
           job = { kind: 'server', ...r, name: makeFilename(seconds, 'mp4') };
+          release();
         } catch (e) {
           serverError = e;
           console.warn('[StreamClipper] modo live falhou, a usar a gravação:', e);
@@ -317,32 +424,32 @@
         }
       }
       if (!job) {
-        await rotated;
-        if (state.video?.seeking) {
-          render('À espera que o vídeo termine a procura…');
-          await waitForSeeked(state.video);
-        }
-        const bufferChanged = snapshotGen !== bufferGen;
         // Num clique imediato, captureStream pode ainda estar a criar as faixas.
         // Dá tempo à inicialização já em curso antes de declarar o buffer vazio.
         for (let i = 0; i < 20 && !state.stream && state.video && state.enabled; i++) await sleep(100);
         if (!state.stream && !snapshot.length) throw serverError || new Error('Nenhum vídeo a gravar ainda.');
         try {
-          job = await recordedJob(seconds, bufferChanged ? now() : clickTime, bufferChanged ? state.segments.slice() : snapshot);
+          job = await recordedJob(seconds, clickTime, snapshot);
         } catch (error) {
           throw serverError ? new Error(serverError.message + ' ' + error.message) : error;
+        } finally {
+          release();
         }
         if (job.got + 0.5 < seconds) {
           job.warning = `Clip parcial: ${job.got.toFixed(1)}s dos ${seconds}s pedidos · ${job.recovered ? 'capturado após o clique, porque o buffer estava vazio' : 'só havia este trecho no buffer'}`;
           job.name = makeFilename(Math.max(1, Math.round(job.got)) + 's_parcial', job.out);
         }
       }
+      job.clipId = clipId;
+      job.channel = channelKey();
       await deliver(job, editor);
     } catch (e) {
       console.error('[StreamClipper]', e);
-      editor?.send({ __scEd: 'error', message: e.message });
+      editor?.send({ __scEd: 'error', message: e.message, clipId });
       toast('Falhou: ' + e.message);
     } finally {
+      release();
+      activeEditor = null;
       state.busy = false;
       const next = clipQueue.shift();
       if (next) runClip(next); else render();
@@ -357,13 +464,13 @@
     if (res?.raw) {
       // A conversão falhou, mas o clip gravado não se perdeu: já foi descarregado tal como
       // estava (ver processor.js). Avisa e não tenta abrir isto no editor (não sabe ler).
-      editor?.send({ __scEd: 'error', message: 'Não consegui preparar o clip, mas gravei-o tal como estava — vê as transferências.' });
+      editor?.send({ __scEd: 'error', message: 'Não consegui preparar o clip, mas gravei-o tal como estava — vê as transferências.', clipId: job.clipId });
       toast('A conversão falhou — guardei o clip em bruto nas transferências (não editável, mas não se perdeu).');
       return;
     }
     if (res?.blob) state.lastClip = { blob: res.blob, name: job.name, channel: channelKey() };
     if (editor && res?.blob) {
-      editor.send({ __scEd: 'clip', blob: res.blob, name: job.name, channel: channelKey() });
+      editor.send({ __scEd: 'clip', blob: res.blob, name: job.name, channel: channelKey(), clipId: job.clipId });
       toast(job.warning || (job.recovered ? `Abriu um trecho recuperado (${Math.round(job.got)}s) · deixa a live a tocar para ter mais buffer` : 'Clip aberto no editor · guarda a partir de lá'));
     } else {
       toast(job.warning || (`Clip guardado: ${job.name}` + (state.lastClip ? ' · ✎ para editar' : '')));
@@ -379,10 +486,8 @@
     if (manual.rec || state.busy) return;
     if (!state.stream) return toast('Para gravar, o buffer tem de estar ON e o vídeo a tocar.');
     const clickTime = now();
-    const preSegments = preRollSeconds ? state.segments
-      .filter((s) => s.start != null && s.start < clickTime && (s.end ?? clickTime) > clickTime - preRollSeconds * 1000)
-      .sort((a, b) => a.start - b.start) : [];
-    if (preRollSeconds && !preSegments.length) return toast('Ainda não há vídeo no buffer.');
+    if (preRollSeconds && bufferedSeconds() < 0.5) return toast('Ainda não há vídeo no buffer.');
+    const preRuns = preRollSeconds ? state.runs.slice() : [];
     let rec;
     try {
       rec = new MediaRecorder(state.stream, recorderOptions(state.stream, state.mime));
@@ -394,11 +499,13 @@
     }
     Object.assign(manual, {
       rec, chunks: [], mime: state.mime, activeMs: 0, since: clickTime, paused: false,
-      preRollSeconds, preRollPromise: null,
+      preRollSeconds, preRollPromise: null, width: state.video?.videoWidth || 0, height: state.video?.videoHeight || 0,
     });
     if (preRollSeconds) {
-      const rotated = rotate().then(scheduleRotation);
-      manual.preRollPromise = rotated.then(() => partsFromSegments(preSegments, clickTime));
+      state.holds++;
+      manual.preRollPromise = buildParts(preRuns, preRollSeconds, clickTime)
+        .finally(() => { state.holds = Math.max(0, state.holds - 1); });
+      manual.preRollPromise.catch(() => {});
     }
     clearInterval(manual.timer);
     manual.timer = setInterval(() => render(), 250);
@@ -420,7 +527,8 @@
     const m = manual, rec = m.rec;
     if (!rec) return;
     const secs = manualSecs();
-    const editor = openEd && !state.busy ? openEditorTab('#pending') : null;
+    const clipId = crypto.randomUUID();
+    const editor = openEd && !state.busy ? openEditorTab('#pending=' + clipId) : null;
     clearInterval(m.timer);
     m.rec = null;
     m.paused = false;
@@ -434,16 +542,16 @@
       m.chunks = [];
       if (!blob.size || secs < 0.5) throw new Error('A gravação ficou vazia.');
       const preParts = m.preRollPromise ? await m.preRollPromise : [];
-      const parts = [...preParts, { blob, outpoint: secs + 5 }];
+      const parts = [...preParts, { blob, outpoint: secs + 5, width: m.width, height: m.height }];
       const got = secs + preParts.reduce((sum, part) => sum + part.outpoint, 0);
       const h264 = /h264|avc1/.test(m.mime) && preParts.every((p) => p.h264), out = 'mp4';
       await deliver({
-        kind: 'clip', parts, got, h264, out,
+        kind: 'clip', parts, got, h264, out, clipId, channel: channelKey(),
         name: makeFilename(m.preRollSeconds ? Math.round(got) + 's' : 'rec' + Math.round(secs), out),
       }, editor);
     } catch (e) {
       console.error('[StreamClipper]', e);
-      editor?.send({ __scEd: 'error', message: e.message });
+      editor?.send({ __scEd: 'error', message: e.message, clipId });
       toast('Falhou: ' + e.message);
     } finally {
       state.busy = false;
@@ -452,13 +560,9 @@
   }
 
   // Clip a partir do buffer gravado do ecrã.
-  async function recordedJob(seconds, clickTime, snapshot = state.segments) {
-    const from = clickTime - seconds * 1000;
-    const segs = snapshot
-      .filter((s) => s.start != null && (s.end ?? clickTime) > from && s.start < clickTime)
-      .sort((a, b) => a.start - b.start);
-    render('A fechar segmentos…');
-    let parts = await partsFromSegments(segs, clickTime), recovered = false;
+  async function recordedJob(seconds, clickTime, runs) {
+    render('A preparar o vídeo gravado…');
+    let parts = await buildParts(runs, seconds, clickTime), recovered = false;
     if (!parts.length) {
       if (!state.stream || !state.video || state.video.paused || state.video.readyState < 2) {
         throw new Error('O buffer não tem vídeo gravado. Reproduz o vídeo até o painel mostrar segundos em reserva e tenta novamente.');
@@ -466,31 +570,20 @@
       render('Buffer vazio · a tentar recuperar a captura…');
       // Uma faixa terminada ou um codificador sem saída não recuperam só com uma espera.
       const recoveryStart = now();
-      if (now() - state.lastDataAt > 5000) state.triedCodecs.add(state.mime);
-      await startBuffer(state.video, true);
-      await sleep(1100);
+      if (now() - state.lastDataAt > 5000) {
+        state.triedCodecs.add(state.mime);
+        await startBuffer(state.video, true);
+      }
+      await sleep(2500);
       if (!state.enabled || !state.stream) throw new Error('A gravação foi desligada.');
-      await rotate();
-      const recoverySegs = state.segments
-        .filter((s) => s.start != null && s.start >= recoveryStart && s.end != null)
-        .sort((a, b) => a.start - b.start);
-      parts = await partsFromSegments(recoverySegs, now());
+      parts = await buildParts(state.runs.slice(), (now() - recoveryStart) / 1000, now());
       if (!parts.length) throw new Error('A captura não recebeu frames. Confirma que o vídeo está a tocar e tenta novamente.');
       recovered = true;
     }
     const got = parts.reduce((a, p) => a + p.outpoint, 0);
-
-    const h264 = parts.every((p) => /h264|avc1/.test(p.blob.type) || p.h264);
+    const h264 = parts.every((p) => p.h264);
     const out = 'mp4';
     return { kind: 'clip', parts, got, h264, out, recovered, name: makeFilename(recovered ? Math.max(1, Math.round(got)) : seconds, out) };
-  }
-
-  async function partsFromSegments(segs, endTime) {
-    await Promise.all(segs.map((s) => waitDone(s)));
-    return segs.map((s, i) => {
-      const endAt = Math.min(s.end ?? endTime, endTime, segs[i + 1]?.start ?? Infinity);
-      return { blob: s.blob, outpoint: Math.max(0, (endAt - s.start) / 1000), h264: /h264|avc1/.test(s.mime || state.mime || '') };
-    }).filter((p) => p.blob?.size > 0 && p.outpoint > 0);
   }
 
   // Canal da live (ex.: "twitch:nome"): o editor lembra-se de onde está a câmara de cada streamer.
@@ -518,7 +611,9 @@
   const pending = new Map();
   const EXT_ORIGIN = new URL(chrome.runtime.getURL('/')).origin;
 
-  const JOB_TIMEOUT_MS = 180000;  // inclui o 1º carregamento do ffmpeg.wasm (~32 MB)
+  // Sem limite fixo para o trabalho todo (recodificar um clip longo pode levar minutos): só falha
+  // se o processador ficar este tempo sem dar sinal de vida (progresso do ffmpeg, etapas…).
+  const JOB_IDLE_MS = 90000;
   let frameReadyResolve = null;
 
   window.addEventListener('message', (ev) => {
@@ -528,7 +623,7 @@
     if (m.type === 'ready') { frameReadyResolve?.(); return; }
     const p = pending.get(m.id);
     if (!p) return;
-    if (m.type === 'progress') render(m.text);
+    if (m.type === 'progress') { p.alive?.(); if (m.text) render(m.text); }
     if (m.type === 'done') { pending.delete(m.id); p.resolve(m); }
     if (m.type === 'error') { pending.delete(m.id); p.reject(new Error(m.message)); }
     if (m.type === 'download-here') {           // fallback: descarregar a partir da página
@@ -568,12 +663,18 @@
     await ensureFrame();
     const id = ++reqId;
     return new Promise((resolve, reject) => {
-      const t = setTimeout(() => {
-        pending.delete(id);
-        resetFrame();
-        reject(new Error('O processamento demorou demasiado. Tenta outra vez.'));
-      }, JOB_TIMEOUT_MS);
+      let t;
+      const arm = () => {
+        clearTimeout(t);
+        t = setTimeout(() => {
+          pending.delete(id);
+          resetFrame();
+          reject(new Error('O processador deixou de responder. Tenta outra vez.'));
+        }, JOB_IDLE_MS);
+      };
+      arm();
       pending.set(id, {
+        alive: arm,
         resolve: (m) => { clearTimeout(t); resolve(m); },
         reject: (e) => { clearTimeout(t); reject(e); },
       });
@@ -672,7 +773,14 @@
     });
   }
 
+  // O editor aberto no clique vê em que passo está o clip (fila, descarga, junção…), em vez de
+  // ficar só em «A preparar o clip…» sem saber se está a andar ou encravado.
+  let activeEditor = null;
   function render(msg) {
+    if (msg && activeEditor && msg !== activeEditor.last) {
+      activeEditor.last = msg;
+      activeEditor.editor.send({ __scEd: 'progress', text: msg, clipId: activeEditor.clipId });
+    }
     if (!panel) return;
     panel.hidden = !state.enabled;
     if (!msg && now() < toastUntil) msg = lastToast;
@@ -755,6 +863,7 @@
         startBuffer(v, true);
       }
     }
+    if (state.stream) maintainBuffer();
     if (!state.busy) render();
   }
 

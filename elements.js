@@ -5,17 +5,22 @@ export const elementVisible = (e, time, duration) => time >= (e.in ?? 0) && time
 export const orderedElements = (st) => [...st.texts, ...st.images].sort((a, b) => (a.z ?? 0) - (b.z ?? 0));
 export const cleanElements = (items) => items.map(({ _box, ...e }) => ({ ...e }));
 
-export function createElementEditor({ st, video, preview, renderPanel, save, addText, mediaItem, fmt, onCommit, onUndo, canUndo, canRedo, onSelection, timelineDuration = () => st.dur, toTimelineTime = time => time, fromTimelineTime = time => time }) {
+// Os tempos dos elementos (in/out) estão em segundos da RÉGUA (vídeo final). now()/seek() são o
+// cursor da timeline; timelineScale() = segundos que a largura inteira da faixa representa (zoom).
+export function createElementEditor({ st, video, preview, renderPanel, save, addText, mediaItem, fmt, onCommit, onUndo, canUndo, canRedo, onSelection, onEditText,
+  timelineDuration = () => st.dur, timelineScale = timelineDuration, now = () => video.currentTime, seek = (t) => { video.pause(); video.currentTime = t; }, pause = () => video.pause(),
+  exportedLength = (start, end) => end - start }) {
   const $ = s => document.querySelector(s);
   const frame = $('#elementFrame'), toolbar = $('#elementToolbar'), tracks = $('#elementTracks');
   const undoStack = [], redoStack = [];
-  let baseline, timer, gesture = false, trackSignature = '', guideX = false, guideY = false;
+  let editingText = false, baseline, timer, gesture = false, trackSignature = '', guideX = false, guideY = false;
   const all = () => orderedElements(st);
   const selected = () => all().find(e => e.id === st.textSel);
   const state = () => JSON.stringify({ texts: cleanElements(st.texts), images: cleanElements(st.images) });
   const nextZ = () => Math.max(0, ...all().map(e => e.z || 0)) + 1;
   const label = e => e.mediaId ? mediaItem(e.mediaId)?.name || 'Ficheiro indisponível' : e.text || 'Texto';
-  const times = e => ({ start: clamp(e.in ?? 0, 0, st.dur), end: clamp(e.out ?? st.dur, 0, st.dur) });
+  const D = () => timelineDuration();
+  const times = e => ({ start: clamp(e.in ?? 0, 0, D()), end: clamp(e.out ?? D(), 0, D()) });
   function buttons() {
     $('#elementUndo').disabled = !(canUndo ? canUndo() : undoStack.length) || st.busy;
     $('#elementRedo').disabled = !(canRedo ? canRedo() : redoStack.length) || st.busy;
@@ -47,12 +52,10 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
     if (!selected()) st.textSel = null;
     save(); renderPanel(); renderTracks(); update(); buttons(); onSelection?.();
   }
-  function select(id, seek = false) {
+  function select(id, seekTo = false) {
     st.textSel = id;
     const e = selected();
-    if (e && seek && st.dur && !elementVisible(e, video.currentTime, st.dur)) {
-      video.pause(); video.currentTime = Math.min(times(e).start, Math.max(0, st.dur - 0.001));
-    }
+    if (e && seekTo && D() && !elementVisible(e, now(), D())) seek(Math.min(times(e).start, Math.max(0, D() - 0.001)));
     renderPanel(); renderTracks(); update(); buttons(); onSelection?.();
   }
   function remove() {
@@ -73,18 +76,18 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
     commit(); renderPanel(); update();
     if (wasSelected) onSelection?.();
   }
-  function trimSelected(edge, time = video.currentTime) {
+  function trimSelected(edge, time = now()) {
     const e = selected(); if (!e || st.busy) return false;
-    const { start, end } = times(e), min = Math.min(.1, st.dur);
+    const { start, end } = times(e), min = Math.min(.1, D());
     commit();
     if (edge === 'in') e.in = clamp(time, 0, end - min);
-    else e.out = clamp(time, start + min, st.dur);
+    else e.out = clamp(time, start + min, D());
     commit(); renderPanel(); update();
     return true;
   }
-  function splitSelected(time = video.currentTime) {
+  function splitSelected(time = now()) {
     const e = selected(); if (!e || st.busy) return false;
-    const { start, end } = times(e), min = Math.min(.1, st.dur);
+    const { start, end } = times(e), min = Math.min(.1, D());
     if (time <= start + min || time >= end - min) return false;
     commit();
     const right = { ...cleanElements([e])[0], id: crypto.randomUUID(), in: time };
@@ -100,7 +103,7 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
   function duplicate() {
     const e = selected(); if (!e || st.busy) return;
     commit();
-    const { start, end } = times(e), length = Math.max(.1, end - start), dur = st.dur;
+    const { start, end } = times(e), length = Math.max(.1, end - start), dur = D();
     let copyIn;
     if (end + .05 < dur) copyIn = end;
     else if (start - length > -.05) copyIn = Math.max(0, start - length);
@@ -112,13 +115,18 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
   function addImage(id, props = {}) {
     const m = mediaItem(id); if (!m || !['image', 'video', 'gif'].includes(m.type) || st.busy) return;
     commit();
-    const e = { id: crypto.randomUUID(), mediaId: id, x: .5, y: .5, size: .4, rotation: 0, z: nextZ(), in: 0, out: null, ...props };
+    // Vídeos e GIFs entram no cursor com a duração original do ficheiro (não ocupam o clip todo);
+    // se forem mais longos do que o resto do vídeo, o vídeo final estica até eles acabarem.
+    // Imagens paradas continuam a cobrir o vídeo inteiro.
+    const timed = (m.type === 'video' || m.type === 'gif') && m.dur > 0;
+    const start = timed ? clamp(now(), 0, Math.max(0, D() - 0.1)) : 0;
+    const e = { id: crypto.randomUUID(), mediaId: id, x: .5, y: .5, size: .4, rotation: 0, z: nextZ(), in: start, out: timed ? start + m.dur : null, ...props };
     st.images.push(e); commit(); select(e.id, true);
   }
   function hit(ev) {
     const r = preview.getBoundingClientRect();
     for (const e of all().reverse()) {
-      if (!e._box || !elementVisible(e, video.currentTime, st.dur)) continue;
+      if (!e._box || !elementVisible(e, now(), D())) continue;
       const a = -(e.rotation || 0) * Math.PI / 180;
       const dx = ev.clientX - r.left - e.x * r.width, dy = ev.clientY - r.top - e.y * r.height;
       const x = dx * Math.cos(a) - dy * Math.sin(a), y = dx * Math.sin(a) + dy * Math.cos(a);
@@ -127,12 +135,13 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
   }
   function update() {
     const e = selected(), b = e?._box;
-    const visible = !!(e && b && elementVisible(e, video.currentTime, st.dur) && !st.busy);
+    const visible = !!(e && b && elementVisible(e, now(), D()) && !st.busy && !editingText);
     frame.hidden = toolbar.hidden = !visible;
     if (visible) {
       Object.assign(frame.style, { left: `${e.x * 100}%`, top: `${e.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%`, transform: `translate(-50%, -50%) rotate(${e.rotation || 0}deg)` });
       frame.setAttribute('aria-label', `Mover ${label(e)}`);
-      const box = preview.getBoundingClientRect(), selection = frame.getBoundingClientRect();
+      // A barra fica fora da vista com zoom (não escala com ela): posição relativa ao seu contentor.
+      const box = toolbar.offsetParent.getBoundingClientRect(), selection = frame.getBoundingClientRect();
       const barWidth = toolbar.offsetWidth, barHeight = toolbar.offsetHeight;
       const maxLeft = Math.max(8, box.width - barWidth - 8);
       const left = clamp(selection.left + selection.width / 2 - box.left - barWidth / 2, 8, maxLeft);
@@ -145,14 +154,11 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
     $('#elementGuideX').hidden = !guideX;
     $('#elementGuideY').hidden = !guideY;
     $('#elementGuideY').style.top = `${guideY * 100}%`;
-    const head = $('#tracksHead');
-    const duration = timelineDuration();
-    head.style.left = `${duration ? clamp(toTimelineTime(video.currentTime) / duration, 0, 1) * 100 : 0}%`;
-    head.hidden = !duration;
+    $('#tracksHead').hidden = !D();
   }
   function startGesture(ev, e, mode) {
     if (ev.button !== 0 || st.busy || !e?._box) return;
-    ev.preventDefault(); ev.stopImmediatePropagation(); video.pause(); commit();
+    ev.preventDefault(); ev.stopImmediatePropagation(); pause(); commit();
     select(e.id); document.activeElement?.blur(); gesture = true;
     const target = ev.currentTarget; target.setPointerCapture(ev.pointerId);
     const r = preview.getBoundingClientRect(), initial = { ...e }, b = { ...e._box };
@@ -194,15 +200,23 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
   }
   preview.addEventListener('pointerdown', ev => {
     const e = hit(ev);
-    if (e) startGesture(ev, e, 'move'); else if (selected()) select(null);
+    if (e) startGesture(ev, e, 'move');
+    else if (selected()) { select(null); ev.scDeselected = true; }   // o editor não trata este clique como "selecionar zona"
   }, true);
   frame.addEventListener('pointerdown', ev => startGesture(ev, selected(), ev.target.dataset.handle || 'move'));
-  const editText = () => { const e = selected(); if (e && !e.mediaId) { renderPanel(); $('#tText')?.focus(); $('#tText')?.select(); } };
+  // Editar o texto: diretamente no resultado, se o editor souber (onEditText); senão na caixa do painel.
+  const setEditingText = (v) => { editingText = v; update(); };
+  const editText = () => {
+    const e = selected();
+    if (!e || e.mediaId) return;
+    if (onEditText) onEditText(e); else { renderPanel(); $('#tText')?.focus(); $('#tText')?.select(); }
+  };
   frame.addEventListener('dblclick', editText);
   preview.addEventListener('dblclick', ev => { const e = hit(ev); if (e) { select(e.id); editText(); } });
   preview.addEventListener('pointermove', ev => { if (!ev.buttons && hit(ev)) { ev.stopImmediatePropagation(); preview.style.cursor = 'move'; } else preview.style.cursor = ''; }, true);
+  // A roda só redimensiona o elemento SELECIONADO (com a moldura à vista); sobre o resto é o zoom da vista.
   function wheel(ev) {
-    const e = ev.currentTarget === frame ? selected() : hit(ev);
+    const h = ev.currentTarget === frame ? selected() : hit(ev), e = h && h === selected() ? h : null;
     if (!e || st.busy) return;
     ev.preventDefault(); ev.stopImmediatePropagation();
     e.size = clamp(e.size * (ev.deltaY < 0 ? 1.06 : 1 / 1.06), e.mediaId ? .03 : .02, e.mediaId ? 2 : .25);
@@ -212,51 +226,50 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
   frame.addEventListener('wheel', wheel, { passive: false });
   function renderTracks() {
     const items = all().reverse();
-    const duration = timelineDuration();
-    const signature = JSON.stringify([st.dur, st.start, st.end, st.rippleCuts, duration, st.textSel, st.name, st.busy, items.map(e => [e.id, e.z, label(e), e.in, e.out])]);
+    const duration = D(), scale = timelineScale();
+    const signature = JSON.stringify([st.dur, st.parts, duration, scale, st.textSel, st.name, st.busy, items.map(e => [e.id, e.z, label(e), e.in, e.out])]);
     if (gesture || signature === trackSignature) return;
     trackSignature = signature;
-    const ruler = $('#elementRuler');
-    ruler.innerHTML = Array.from({ length: 6 }, (_, i) => `<span>${fmt(duration * i / 5)}</span>`).join('');
-    const pct = t => duration ? t / duration * 100 : 0;
+    const pct = t => scale ? t / scale * 100 : 0;
     tracks.innerHTML = items.map(e => {
-      const {start, end} = times(e), displayStart = toTimelineTime(start), displayEnd = toTimelineTime(end);
-      return `<div class="elementTrack" data-track="${esc(e.id)}"><button class="trackLabel" data-select="${esc(e.id)}" draggable="true" title="Selecionar ${esc(label(e))} · arrasta para reordenar as camadas">${e.mediaId ? '▧' : 'T'} ${esc(label(e))}</button><div class="trackLane"><div class="elementBlock ${e.mediaId ? 'imageBlock' : ''} ${e.id === st.textSel ? 'on' : ''}" data-element="${esc(e.id)}" style="left:${pct(displayStart)}%;width:${Math.max(0, pct(displayEnd - displayStart))}%" role="button" tabindex="0" aria-label="${esc(label(e))}: ${fmt(displayStart)} a ${fmt(displayEnd)}"><span class="timeGrip" data-edge="in" title="Ajustar início"></span><span class="blockName">${esc(label(e))}</span><span class="timeGrip end" data-edge="out" title="Ajustar fim"></span></div></div></div>`;
+      const {start, end} = times(e), displayStart = start, displayEnd = end;
+      // Um elemento que cai todo num trecho cortado (que pode continuar a ocupar espaço na régua,
+      // ou ficar com a largura mínima do bloco) — ou cujo ficheiro já não existe — parecia normal
+      // na timeline sem nunca aparecer no vídeo. Fica marcado e explica porquê.
+      const outside = exportedLength(start, end) < 0.05, missing = e.mediaId && !mediaItem(e.mediaId);
+      const warn = missing ? 'O ficheiro já não está na biblioteca — não aparece no vídeo' : outside ? 'Fora do trecho exportado — não aparece no vídeo. Arrasta-o para dentro do vídeo.' : '';
+      return `<div class="elementTrack" data-track="${esc(e.id)}"><button class="trackLabel" data-select="${esc(e.id)}" draggable="true" title="Selecionar ${esc(label(e))} · arrasta para reordenar as camadas">${e.mediaId ? '▧' : 'T'} ${esc(label(e))}</button><div class="trackLane"><div class="elementBlock ${e.mediaId ? 'imageBlock' : ''} ${e.id === st.textSel ? 'on' : ''} ${outside || missing ? 'unseen' : ''}" data-element="${esc(e.id)}" style="left:${pct(displayStart)}%;width:${Math.max(0, pct(displayEnd - displayStart))}%" role="button" tabindex="0" ${warn ? `title="${esc(warn)}"` : ''} aria-label="${esc(label(e))}: ${fmt(displayStart)} a ${fmt(displayEnd)}${warn ? ' · ' + esc(warn) : ''}"><span class="timeGrip" data-edge="in" title="Ajustar início"></span><span class="blockName">${esc(label(e))}</span><span class="timeGrip end" data-edge="out" title="Ajustar fim"></span></div></div></div>`;
     }).join('');
     buttons();
   }
   function trackDrag(ev) {
-    const block = ev.target.closest('[data-element]'); if (!block || st.busy || !st.dur || ev.button !== 0) return;
+    const block = ev.target.closest('[data-element]'); if (!block || st.busy || !D() || ev.button !== 0) return;
     const e = all().find(e => e.id === block.dataset.element); if (!e) return;
-    ev.preventDefault(); commit(); video.pause();
+    ev.preventDefault(); commit(); pause();
     // Manter o nó que captura o ponteiro até terminar o arrasto.
     gesture = true; st.textSel = e.id; renderPanel(); update(); buttons(); onSelection?.();
     block.classList.add('on'); block.setPointerCapture(ev.pointerId);
     const r = block.parentElement.getBoundingClientRect(), x0 = ev.clientX, old = { in: e.in, out: e.out }, initial = times(e), edge = ev.target.dataset.edge;
-    const duration = timelineDuration(), displayStart = toTimelineTime(initial.start), displayEnd = toTimelineTime(initial.end);
-    const min = Math.min(.1, st.dur), displayLength = displayEnd - displayStart;
-    const points = [0, duration, toTimelineTime(st.start), toTimelineTime(st.end), toTimelineTime(video.currentTime), ...all().filter(x => x !== e).flatMap(x => [toTimelineTime(times(x).start), toTimelineTime(times(x).end)])];
-    const snap = (value, alt) => alt ? value : points.find(x => Math.abs(x - value) < duration * 7 / r.width) ?? value;
+    const duration = D(), scale = timelineScale(), displayStart = initial.start, displayEnd = initial.end;
+    const min = Math.min(.1, duration), displayLength = displayEnd - displayStart;
+    const points = [0, duration, now(), ...all().filter(x => x !== e).flatMap(x => [times(x).start, times(x).end])];
+    const snap = (value, alt) => alt ? value : points.find(x => Math.abs(x - value) < scale * 7 / r.width) ?? value;
     let moved = false;
     const move = event => {
       if (Math.abs(event.clientX - x0) < 3 && !moved) return;
       moved = true;
-      const dt = (event.clientX - x0) / r.width * duration;
-      if (edge === 'in') { e.in = clamp(fromTimelineTime(snap(displayStart + dt, event.altKey)), 0, initial.end - min); e.out = initial.end; }
-      else if (edge === 'out') { e.in = initial.start; e.out = clamp(fromTimelineTime(snap(displayEnd + dt, event.altKey)), initial.start + min, st.dur); }
+      const dt = (event.clientX - x0) / r.width * scale;
+      if (edge === 'in') { e.in = clamp(snap(displayStart + dt, event.altKey), 0, initial.end - min); e.out = initial.end; }
+      else if (edge === 'out') { e.in = initial.start; e.out = clamp(snap(displayEnd + dt, event.altKey), initial.start + min, duration); }
       else {
         let start = snap(displayStart + dt, event.altKey);
         if (start === displayStart + dt) start = snap(start + displayLength, event.altKey) - displayLength;
         start = clamp(start, 0, duration - displayLength);
-        e.in = fromTimelineTime(start); e.out = fromTimelineTime(start + displayLength);
+        e.in = start; e.out = start + displayLength;
       }
-      // Tem de usar toTimelineTime (posição na régua), não e.in/st.dur (tempo da fonte): divergem
-      // sempre que a régua não é 1:1 com a fonte (segmentos cortados/reordenados) — dava para ver
-      // o bloco "teleportar-se" a meio do arrasto, porque isto ficava com a escala errada.
-      const editIn = toTimelineTime(e.in), editOut = toTimelineTime(e.out);
-      block.style.left = `${duration ? editIn / duration * 100 : 0}%`;
-      block.style.width = `${duration ? Math.max(0, editOut - editIn) / duration * 100 : 0}%`;
-      video.currentTime = edge === 'out' ? Math.max(e.in, e.out - .025) : e.in;
+      block.style.left = `${scale ? e.in / scale * 100 : 0}%`;
+      block.style.width = `${scale ? Math.max(0, e.out - e.in) / scale * 100 : 0}%`;
+      seek(edge === 'out' ? Math.max(e.in, e.out - .025) : e.in);
     };
     const end = event => {
       block.removeEventListener('pointermove', move); block.removeEventListener('pointerup', end); block.removeEventListener('pointercancel', end);
@@ -270,8 +283,8 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
   tracks.addEventListener('click', ev => {
     const id = ev.target.closest('[data-select]')?.dataset.select;
     if (id) select(id, true);
-    else if (!ev.target.closest('[data-element]') && ev.target.closest('.trackLane') && st.dur) {
-      const r = ev.target.closest('.trackLane').getBoundingClientRect(); video.pause(); video.currentTime = fromTimelineTime(clamp((ev.clientX - r.left) / r.width * timelineDuration(), 0, timelineDuration()));
+    else if (!ev.target.closest('[data-element]') && ev.target.closest('.trackLane') && D()) {
+      const r = ev.target.closest('.trackLane').getBoundingClientRect(); seek(clamp((ev.clientX - r.left) / r.width * timelineScale(), 0, D()));
     }
   });
   tracks.addEventListener('keydown', ev => { if (ev.key === 'Enter' && ev.target.dataset.element) { ev.preventDefault(); select(ev.target.dataset.element, true); } });
@@ -386,6 +399,7 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
     else if (ctrl && k === 'd') { ev.preventDefault(); ev.stopImmediatePropagation(); duplicate(); }
     else if (!ctrl && !ev.altKey && (k === 'delete' || k === 'backspace') && selected()) { ev.preventDefault(); ev.stopImmediatePropagation(); remove(); }
     else if (k === 'escape') select(null);
+    else if (k === 'enter' && selected() && !selected().mediaId) { ev.preventDefault(); ev.stopImmediatePropagation(); editText(); }
     else if (!ctrl && !ev.altKey && k === 't') { ev.preventDefault(); ev.stopImmediatePropagation(); addText(); }
     else if (selected() && ['arrowleft','arrowright','arrowup','arrowdown'].includes(k)) {
       ev.preventDefault(); ev.stopImmediatePropagation();
@@ -396,5 +410,5 @@ export function createElementEditor({ st, video, preview, renderPanel, save, add
     }
   }, true);
   reset();
-  return { selected, select, addImage, remove, removeById, duplicate, trimSelected, splitSelected, changed, commit, reset, update, renderTracks, nextZ, undo: history, refreshButtons: buttons };
+  return { selected, select, addImage, remove, removeById, duplicate, trimSelected, splitSelected, changed, commit, reset, update, renderTracks, nextZ, undo: history, refreshButtons: buttons, setEditingText };
 }

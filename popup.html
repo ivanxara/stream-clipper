@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="pt">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stream Clipper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <img src="icons/48.png" width="32" height="32" alt="">
+      <div><strong>Stream Clipper</strong><span>Captura e edição de clips</span></div>
+    </header>
+
+    <section class="power card" aria-label="Ligar ou desligar Stream Clipper">
+      <div><strong>Ligar / desligar</strong><span id="powerText">A verificar…</span></div>
+      <button id="powerSwitch" class="switch" type="button" role="switch" aria-label="Ligar Stream Clipper" aria-checked="false" disabled><span></span></button>
+    </section>
+
+    <button id="openEditor" class="editorButton" type="button">
+      <span class="editorIcon" aria-hidden="true">↗</span>
+      <span><strong>Abrir editor</strong><small>Começar sem vídeo</small></span>
+      <span class="arrow" aria-hidden="true">›</span>
+    </button>
+
+    <div class="groupLabel">Dados guardados</div>
+    <div class="data card">
+      <button id="clearTemplates" type="button" disabled>
+        <span class="rowIcon" aria-hidden="true">▦</span>
+        <span><strong>Limpar templates</strong><small id="templateCount">A verificar…</small></span>
+        <span class="arrow" aria-hidden="true">›</span>
+      </button>
+      <button id="clearSaved" type="button" disabled>
+        <span class="rowIcon" aria-hidden="true">▣</span>
+        <span><strong>Limpar guardados</strong><small id="savedCount">Clips recentes e sessões</small></span>
+        <span class="arrow" aria-hidden="true">›</span>
+      </button>
+      <button id="clearLibrary" type="button" disabled>
+        <span class="rowIcon" aria-hidden="true">▧</span>
+        <span><strong>Limpar biblioteca</strong><small id="libraryCount">A verificar…</small></span>
+        <span class="arrow" aria-hidden="true">›</span>
+      </button>
+    </div>
+
+    <div id="confirmBox" class="confirm card" hidden>
+      <strong id="confirmTitle"></strong>
+      <p id="confirmText"></p>
+      <div class="confirmActions">
+        <button id="cancelClear" type="button">Cancelar</button>
+        <button id="confirmClear" type="button">Limpar</button>
+      </div>
+    </div>
+    <p id="message" role="status" aria-live="polite"></p>
+  </main>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

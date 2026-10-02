@@ -32,13 +32,14 @@
     </div>
 
     <div id="resultBox" class="resultBox">
+      <div id="resultView" class="resultView">
       <canvas id="preview"></canvas>
-      <div id="splitBottomFrame" class="splitBottomFrame" hidden>
-        <span class="splitZoneLabel">Enquadramento</span>
-        <button class="splitZoom nw" data-corner="nw" aria-label="Zoom da zona inferior pelo canto superior esquerdo"></button>
-        <button class="splitZoom ne" data-corner="ne" aria-label="Zoom da zona inferior pelo canto superior direito"></button>
-        <button class="splitZoom sw" data-corner="sw" aria-label="Zoom da zona inferior pelo canto inferior esquerdo"></button>
-        <button class="splitZoom se" data-corner="se" aria-label="Zoom da zona inferior pelo canto inferior direito"></button>
+      <div id="zoneFrame" class="zoneFrame" hidden>
+        <span id="zoneLabel" class="zoneLabel">Enquadramento</span>
+        <button class="zoneZoom nw" data-corner="nw" aria-label="Zoom pelo canto superior esquerdo"></button>
+        <button class="zoneZoom ne" data-corner="ne" aria-label="Zoom pelo canto superior direito"></button>
+        <button class="zoneZoom sw" data-corner="sw" aria-label="Zoom pelo canto inferior esquerdo"></button>
+        <button class="zoneZoom se" data-corner="se" aria-label="Zoom pelo canto inferior direito"></button>
       </div>
       <button id="splitDivider" class="splitDivider" role="slider" aria-label="Altura da câmara" aria-valuemin="20" aria-valuemax="50" aria-valuenow="35" aria-orientation="vertical" title="Arrasta para ajustar a altura da câmara · duplo clique alterna 40% / 50%" hidden><span>↕ <b id="splitDividerValue">35%</b></span></button>
       <div id="elementGuideX" class="elementGuide vertical" hidden></div>
@@ -49,6 +50,13 @@
         <button class="elementGrip sw" data-handle="sw" aria-label="Redimensionar pelo canto inferior esquerdo"></button>
         <button class="elementGrip se" data-handle="se" aria-label="Redimensionar pelo canto inferior direito"></button>
         <button class="elementRotate" data-handle="rotate" aria-label="Rodar elemento" title="Rodar · Shift = passos de 15°">↻</button>
+      </div>
+      </div>
+      <div id="viewZoom" class="viewZoom" hidden>
+        <button id="viewZoomOut" type="button" aria-label="Menos zoom na vista" title="Menos zoom">−</button>
+        <span id="viewZoomV">100%</span>
+        <button id="viewZoomIn" type="button" aria-label="Mais zoom na vista" title="Mais zoom">+</button>
+        <button id="viewZoomReset" type="button" title="Ver o vídeo inteiro (duplo clique no vídeo)">Ajustar</button>
       </div>
       <div id="elementToolbar" class="elementToolbar" hidden>
         <button data-action="duplicate" title="Duplicar (Ctrl+D)">Duplicar</button>
@@ -71,8 +79,8 @@
         <div class="editTools" role="group" aria-label="Ferramentas de corte">
           <button id="setIn" class="btn toolIcon" aria-label="Marcar início (I)" title="Marcar início (I)"><svg class="trimMarkIcon" viewBox="0 0 20 20" aria-hidden="true"><path class="trimBoundary" d="M4.5 3v14"/><path d="m14.5 5.5-4.5 4.5 4.5 4.5M10 10H4.5"/></svg><span>In&#237;cio</span></button>
           <button id="setOut" class="btn toolIcon" aria-label="Marcar fim (O)" title="Marcar fim (O)"><svg class="trimMarkIcon" viewBox="0 0 20 20" aria-hidden="true"><path class="trimBoundary" d="M15.5 3v14"/><path d="m5.5 5.5 4.5 4.5-4.5 4.5M10 10h5.5"/></svg><span>Fim</span></button>
-          <button id="splitClip" class="btn toolIcon" aria-label="Dividir segmento (Ctrl+B)" title="Dividir segmento (Ctrl+B)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="m8 6.5 12 12M8 17.5l5.5-5.5M17 7l3-3M13.5 12H21"/></svg><span>Dividir</span></button>
-          <button id="removeSegment" class="btn toolIcon danger" aria-label="Remover segmento" title="Remover segmento" aria-haspopup="menu" aria-expanded="false" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/></svg><span>Remover</span><svg class="menuChevron" viewBox="0 0 12 12" aria-hidden="true"><path d="m2 4 4 4 4-4"/></svg></button>
+          <button id="splitClip" class="btn toolIcon" aria-label="Dividir no cursor (Ctrl+B)" title="Dividir no cursor (Ctrl+B)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="m8 6.5 12 12M8 17.5l5.5-5.5M17 7l3-3M13.5 12H21"/></svg><span>Dividir</span></button>
+          <button id="removeSegment" class="btn toolIcon danger" aria-label="Apagar" title="Apagar" hidden disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3"/></svg><span>Apagar</span></button>
         </div>
         <div class="mediaTools" role="group" aria-label="Adicionar media">
           <button id="addVideo" class="btn toolIcon" title="Anexar vídeo à faixa principal" disabled><span aria-hidden="true">＋▣</span><span>Vídeo</span></button>
@@ -81,19 +89,23 @@
           <input id="audioFiles" type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac,.opus" multiple hidden>
         </div>
         <span class="spacer"></span>
+        <div class="zoomTools" role="group" aria-label="Zoom da timeline">
+          <button id="tlZoomOut" class="btn small" title="Menos zoom na timeline (−) · Ctrl+roda" aria-label="Menos zoom na timeline" disabled>−</button>
+          <input id="tlZoom" type="range" min="0" max="100" step="1" value="0" aria-label="Zoom da timeline" title="Zoom da timeline · também: roda do rato em cima da timeline (Shift+roda anda para os lados)" disabled>
+          <button id="tlZoomIn" class="btn small" title="Mais zoom na timeline (+) · Ctrl+roda" aria-label="Mais zoom na timeline" disabled>+</button>
+          <button id="tlFit" class="btn small" title="Ver a timeline inteira" disabled>Ajustar</button>
+        </div>
       </div>
       <div class="tracksWrap">
+        <div id="tracksInner" class="tracksInner">
         <div id="elementRuler" class="elementRuler" title="Clica ou arrasta para percorrer o vídeo"></div>
         <div id="elementTracks"></div>
         <div class="videoTrackRow"><span class="trackLabel">&#9654; V&#237;deo</span>
           <div id="timeline" class="timeline">
             <div class="track"></div>
             <div id="ranges" class="ranges"></div>
-            <div id="sel" class="sel" hidden></div>
-            <div id="hIn" class="handle in" title="Arrasta para mudar o início"></div>
-            <div id="hOut" class="handle out" title="Arrasta para mudar o fim"></div>
+            <div id="dropMarker" class="dropMarker" hidden></div>
             <div id="keys"></div>
-            <div id="head" class="playhead"></div>
           </div>
         </div>
         <div id="appendSkeletonRow" class="appendSkeletonRow" role="status" aria-live="polite" hidden>
@@ -102,6 +114,7 @@
         </div>
         <div id="audioTracks"></div>
         <div class="tracksHeadWrap"><div id="tracksHead"><button id="scrubHandle" class="scrubHandle" type="button" role="slider" aria-label="Posição no vídeo" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0:00.0" title="Arrasta para percorrer o vídeo"></button></div></div>
+        </div>
       </div>
     </div>
 
@@ -123,9 +136,11 @@
         </div>
         <div class="progRow"><div id="progress" class="progress" hidden><div></div></div>
           <button id="cancelExp" class="btn small danger" hidden title="Parar a exportação">✕ Cancelar</button></div>
-        <p id="status" class="status muted"></p>
         <button id="saveCopy" class="btn small" hidden title="O vídeo foi só para o TikTok; isto guarda-o também em Transferências/StreamClips">💾 Guardar cópia no PC</button>
-        <button id="editorHelp" class="btn small helpButton" aria-label="Ajuda e atalhos" title="Ajuda e atalhos">ⓘ <span>Ajuda</span></button>
+        <div class="exportFooter">
+          <p id="status" class="status muted"></p>
+          <button id="editorHelp" class="btn small helpButton" aria-label="Ajuda e atalhos" title="Ajuda e atalhos">ⓘ</button>
+        </div>
       </div>
     </aside>
   </main>
@@ -135,13 +150,11 @@
     <button role="menuitem" data-context-action="delete">Apagar <kbd>Del</kbd></button>
   </div>
   <div id="videoContextMenu" class="elementContextMenu" role="menu" aria-label="Ações do vídeo" hidden>
-    <button role="menuitem" data-video-action="split">Dividir aqui <kbd>Ctrl B</kbd></button>
-    <button role="menuitem" data-video-action="duplicate">Duplicar segmento</button>
-    <button role="menuitem" data-video-action="openSegment">Abrir segmento noutra aba</button>
-    <button role="menuitem" data-video-action="delete">Remover, manter espaço <kbd>Del</kbd></button>
-    <button role="menuitem" data-video-action="rippleDelete">Remover e deslocar o resto <kbd>Shift Del</kbd></button>
-    <button role="menuitem" data-video-action="restore">Repor trecho</button>
-    <button role="menuitem" data-video-action="restoreAll">Repor vídeo completo</button>
+    <button role="menuitem" data-video-action="split">Dividir no cursor <kbd>Ctrl B</kbd></button>
+    <button role="menuitem" data-video-action="duplicate">Duplicar clip <kbd>Ctrl D</kbd></button>
+    <button role="menuitem" data-video-action="openSegment">Abrir este clip noutra aba</button>
+    <button role="menuitem" data-video-action="delete">Apagar clip <kbd>Del</kbd></button>
+    <button role="menuitem" data-video-action="restoreAll">Repor o vídeo completo</button>
   </div>
   <dialog id="templatesDlg" class="ttDlg templatesDlg" aria-labelledby="templatesTitle">
     <div class="templatesBody">
@@ -157,19 +170,22 @@
   <dialog id="helpDlg" class="ttDlg helpDlg" aria-labelledby="helpTitle">
     <form method="dialog">
       <div class="hrow"><b id="helpTitle">Ajuda e atalhos</b><button class="btn small" aria-label="Fechar ajuda" autofocus>✕</button></div>
-      <p>Seleciona um elemento no visor ou na timeline. Arrasta para mover, usa os cantos para redimensionar e a pega ↻ para rodar.</p>
+      <p><b>Resultado:</b> a roda do rato faz zoom da vista (para ver pormenores) e, com zoom, arrastar anda para os lados; duplo clique volta a ver tudo. Para mudar o enquadramento, clica primeiro numa zona (câmara, jogo, moldura…): aparece a moldura dela — arrasta dentro para enquadrar e usa os cantos (ou a roda dentro dela) para o zoom. Esc larga a zona.</p>
+      <p>Textos e imagens: arrasta para mover, cantos para redimensionar, ↻ para rodar. Duplo clique num texto (ou Enter) para o escrever diretamente no vídeo; Esc ou clicar fora termina.</p>
       <p>Em «Adicionar elemento» → «Ficheiro», carrega imagens, GIFs ou vídeos MOV/MP4 e clica numa miniatura para adicionar ao visor. GIFs e vídeos repetem sem som durante o intervalo do elemento; a animação também fica na exportação.</p>
-      <p>Usa «+ Vídeo» para anexar imediatamente um ou mais clips ao fim da faixa principal e aumentar a timeline. Podes pré-visualizar, cortar e dividir logo; a adaptação dos formatos só acontece ao exportar. Para sobrepor um vídeo, usa «Adicionar elemento» → «Ficheiro». «+ Música» cria uma faixa de áudio; arrasta-a para posicionar, usa as extremidades para cortar e ajusta volume e fades no painel lateral.</p>
-      <p>Na timeline, arrasta o marcador amarelo ou a régua de tempo para percorrer o vídeo. Com um elemento selecionado, Início/Fim e Dividir atuam nesse elemento; sem seleção, atuam no vídeo. No botão direito de um segmento, «Duplicar segmento» insere uma cópia imediatamente a seguir na exportação; «Abrir segmento noutra aba» cria uma edição independente só desse intervalo. Em «Remover», escolhe se o espaço fica vazio ou se o conteúdo seguinte avança para o ocupar. O marcador ↶ repõe qualquer corte; no menu do vídeo podes repor o vídeo completo.</p>
-      <p>No Streamer, arrasta a divisão verde para ajustar a altura da câmara. Clica na zona de baixo para mover o conteúdo e ajustar o zoom pelos cantos da moldura azul.</p>
-      <p>No Desfocado e Original, usa «Zoom do vídeo», os botões − / + ou a roda do rato sobre o vídeo para aproximar até 400%. Arrasta para enquadrar e usa «Repor enquadramento» para voltar ao início. O zoom fica no vídeo exportado.</p>
+      <p>Usa «+ Vídeo» para anexar um ou mais vídeos ao fim da faixa de vídeo, como clips normais (podes arrastá-los para outro sítio, cortar, dividir e duplicar); a junção dos ficheiros só acontece ao exportar. Para sobrepor um vídeo, usa «Adicionar elemento» → «Ficheiro». «+ Música» cria uma faixa de áudio; arrasta-a para posicionar, usa as extremidades para cortar e ajusta volume e fades no painel lateral.</p>
+      <p><b>Timeline:</b> a faixa de vídeo é uma fila de clips encostados, como num editor normal. Clica num clip para o selecionar; arrasta-o para mudar de sítio; puxa as pontas para cortar (ou recuperar o que cortaste). Ctrl+B divide no cursor, Ctrl+D duplica o clip selecionado (uma cópia inteira logo a seguir), Delete apaga-o e o resto encosta. Início/Fim (I/O) cortam o clip debaixo do cursor até ao cursor. Com um texto/imagem/música selecionado, estas ações atuam nele. Zoom da timeline: − / + / Ajustar, ou Ctrl+roda. No botão direito de um clip há também «Abrir este clip noutra aba» e «Repor o vídeo completo».</p>
+      <p>No Streamer, arrasta a divisão verde para ajustar a altura da câmara.</p>
+      <p>No Desfocado e Original, usa «Zoom do vídeo» e os botões − / + no painel (ou clica no vídeo e usa a roda/os cantos) para aproximar até 400%. Arrasta dentro da moldura para enquadrar e usa «Repor enquadramento» para voltar ao início. O zoom fica no vídeo exportado.</p>
       <dl class="shortcutList">
         <dt>Play / pausa</dt><dd><kbd>Espaço</kbd> / <kbd>K</kbd></dd>
-        <dt>Marcar início / fim</dt><dd><kbd>I</kbd> / <kbd>O</kbd></dd>
-        <dt>Dividir no cursor / apagar segmento</dt><dd><kbd>Ctrl+B</kbd> / <kbd>Delete</kbd></dd>
-        <dt>Remover e deslocar o resto</dt><dd><kbd>Shift+Delete</kbd></dd>
+        <dt>Cortar início / fim no cursor</dt><dd><kbd>I</kbd> / <kbd>O</kbd></dd>
+        <dt>Dividir no cursor / apagar clip</dt><dd><kbd>Ctrl+B</kbd> / <kbd>Delete</kbd></dd>
+        <dt>Zoom da timeline</dt><dd><kbd>+</kbd> / <kbd>−</kbd> · <kbd>Ctrl</kbd>+roda</dd>
+        <dt>Editar texto no vídeo</dt><dd>duplo clique / <kbd>Enter</kbd></dd>
         <dt>Mover seleção / avançar frame</dt><dd><kbd>←</kbd> <kbd>→</kbd></dd>
         <dt>Adicionar texto</dt><dd><kbd>T</kbd></dd>
+        <dt>Posição da moldura (Vertical)</dt><dd><kbd>P</kbd></dd>
         <dt>Apagar / duplicar</dt><dd><kbd>Del</kbd> / <kbd>Ctrl D</kbd></dd>
         <dt>Desfazer / refazer edições</dt><dd><kbd>Ctrl Z</kbd> / <kbd>Ctrl ⇧Z</kbd></dd>
         <dt>Exportar / enviar para TikTok</dt><dd><kbd>E</kbd> / <kbd>⇧E</kbd></dd>

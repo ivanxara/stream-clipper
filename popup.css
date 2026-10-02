@@ -1,0 +1,42 @@
+:root { color-scheme: dark; font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color: #ececf1; background: #0e0e12; }
+* { box-sizing: border-box; }
+body { width: 312px; margin: 0; }
+main { padding: 14px; }
+button { font: inherit; cursor: pointer; }
+button:disabled { cursor: default; opacity: .5; }
+button:focus-visible { outline: 2px solid #b98cff; outline-offset: 2px; }
+header { display: flex; align-items: center; gap: 10px; margin: 1px 2px 15px; }
+header img { border-radius: 8px; }
+header div, .power div, .editorButton > span:nth-child(2), .data button > span:nth-child(2) { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; }
+header strong { font-size: 14px; }
+header span, .power span, small, .groupLabel { color: #9696a5; font-size: 11px; }
+.card { background: #191920; border: 1px solid #2d2d38; border-radius: 11px; }
+.power { display: flex; justify-content: space-between; align-items: center; padding: 11px 12px; }
+.power strong { font-size: 12px; }
+.switch { position: relative; width: 36px; height: 21px; flex: none; border: 1px solid #484853; border-radius: 20px; background: #33333e; padding: 0; transition: background .15s; }
+.switch span { display: block; position: absolute; top: 2px; left: 2px; width: 15px; height: 15px; border-radius: 50%; background: #ececf1; transition: transform .15s; }
+.switch[aria-checked="true"] { border-color: #9146ff; background: #9146ff; }
+.switch[aria-checked="true"] span { transform: translateX(15px); background: #fff; }
+.editorButton { display: flex; align-items: center; gap: 10px; width: 100%; margin: 9px 0 17px; padding: 11px; text-align: left; color: #fff; border: 1px solid #9146ff; border-radius: 10px; background: linear-gradient(110deg, #7134db, #a63be7); }
+.editorButton:hover { filter: brightness(1.12); }
+.editorButton small { color: #f0dcff; }
+.editorButton > span:nth-child(2), .data button > span:nth-child(2) { flex: 1; }
+.editorIcon { display: grid; place-items: center; width: 29px; height: 29px; border-radius: 8px; background: #ffffff2a; font-size: 17px; }
+.arrow { color: #a9a9b6; font-size: 20px; line-height: 1; }
+.editorButton .arrow { color: #fff; }
+.groupLabel { margin: 0 2px 6px; text-transform: uppercase; letter-spacing: .08em; font-size: 10px; }
+.data { overflow: hidden; }
+.data button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 11px; text-align: left; color: #ececf1; background: none; border: 0; }
+.data button + button { border-top: 1px solid #2d2d38; }
+.data button:hover:not(:disabled) { background: #23232d; }
+.data strong { font-size: 12px; font-weight: 600; }
+.rowIcon { display: grid; place-items: center; width: 29px; height: 29px; flex: none; border: 1px solid #393943; border-radius: 8px; color: #c09bff; font-size: 16px; }
+.confirm { padding: 11px; margin-top: 9px; border-color: #7b505a; }
+.confirm[hidden] { display: none; }
+.confirm strong { font-size: 12px; }
+.confirm p { margin: 5px 0 10px; color: #b4b4c1; font-size: 11px; }
+.confirmActions { display: flex; justify-content: flex-end; gap: 6px; }
+.confirmActions button { padding: 5px 10px; border: 1px solid #3c3c48; border-radius: 6px; background: #282832; color: #ececf1; }
+#confirmClear { border-color: #a54a59; background: #a4344a; color: #fff; }
+#message { margin: 7px 2px 0; color: #b98cff; font-size: 11px; }
+#message:empty { display: none; }

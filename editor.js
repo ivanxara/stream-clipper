@@ -4,9 +4,10 @@
 // o ffmpeg.wasm só junta o som no fim.
 import { parseMp4 } from './mp4.js';
 import { FFmpeg } from './lib/ffmpeg/index.js';
-import { loadLastClip, saveLastClip, listRecentClips, loadRecentClip, saveRecentClip, touchRecentClip, loadEditorSession, saveEditorSession, listMedia, putMedia, deleteMedia, listTemplates, putTemplate, deleteTemplate} from './clipstore.js';
+import { loadLastClip, loadClipById, saveLastClip, listRecentClips, loadRecentClip, saveRecentClip, touchRecentClip, loadEditorSession, saveEditorSession, listMedia, putMedia, deleteMedia, listTemplates, putTemplate, deleteTemplate} from './clipstore.js';
 import { importMediaFile, inspectVideoFile, openMediaReader, usesFrameReader, isGif } from './media.js';
 import { createElementEditor, elementVisible, orderedElements, cleanElements } from './elements.js';
+import { createTracker, workSize, toPlanes, smoothPath, samplePath, LOST_SCORE } from './tracker.js';
 
 const $ = (s) => document.querySelector(s);
 const extURL = (p) => (globalThis.chrome?.runtime?.getURL ? chrome.runtime.getURL(p) : new URL(p, location.href).href);
@@ -23,12 +24,12 @@ const preview = $('#preview');
 const pctx = preview.getContext('2d');
 let elementEditor = null;
 let previewZone = null;
-let pendingTemplateDuration = null;
+let pendingTemplate = null;
 
 const st = {
   blob: null, name: 'clip.mp4', buf: null, mp4: null,
-  srcW: 16, srcH: 9, dur: 0, start: 0, end: 0,
-  parts: null, activePart: 0, rippleCuts: [],
+  srcW: 16, srcH: 9, dur: 0,
+  parts: [], activePart: 0,                            // faixa de vídeo: clips encostados (ver «timeline: modelo»)
   layout: 'streamer',
   framing: { blur: { scale: 1, ox: 0, oy: 0 }, original: { scale: 1, ox: 0, oy: 0 } },
   crop: { keys: [] },                                  // [{t, x, y, w}] (coordenadas 0..1 da fonte)
@@ -41,7 +42,6 @@ const st = {
   images: [],
   audioTracks: [],
   audioSel: null,
-  sequenceClips: [],
   busy: false,
 };
 
@@ -50,13 +50,12 @@ const st = {
 const editUndo = [], editRedo = [];
 function videoSnapshot() {
   return {
-    start: st.start, end: st.end, parts: structuredClone(st.parts), activePart: st.activePart,
-    rippleCuts: structuredClone(st.rippleCuts),
+    parts: structuredClone(st.parts), activePart: st.activePart,
     audioTracks: structuredClone(st.audioTracks), audioSel: st.audioSel,
     layout: st.layout, streamer: structuredClone(st.streamer), keys: structuredClone(st.crop.keys),
     framing: structuredClone(st.framing),
     cropDefault: loadJSON('sc.crop', null),
-    cursor: video.currentTime || 0,
+    cursor: currentTimelineTime(),
   };
 }
 const videoEditKey = ({ cursor, activePart, ...edit }) => JSON.stringify(edit);
@@ -75,7 +74,10 @@ function recordVideoEdit(before) {
 }
 function restoreVideoEdit(s) {
   video.pause();
-  Object.assign(st, { start: s.start, end: s.end, parts: structuredClone(s.parts), activePart: s.activePart, rippleCuts: structuredClone(s.rippleCuts || []) });
+  sequenceVideo.pause();
+  st.parts = structuredClone(s.parts);
+  st.activePart = clamp(s.activePart || 0, 0, Math.max(0, st.parts.length - 1));
+  partSel = -1;
   st.audioTracks = structuredClone(s.audioTracks || []);
   st.audioSel = s.audioSel || null;
   st.streamer = structuredClone(s.streamer);
@@ -83,11 +85,11 @@ function restoreVideoEdit(s) {
   st.crop.keys = structuredClone(s.keys);
   if (s.cropDefault) saveJSON('sc.crop', s.cropDefault);
   else try { localStorage.removeItem('sc.crop'); } catch {}
-  video.currentTime = clamp(s.cursor, 0, st.dur);
   setLayout(s.layout);
   placeRects();
   updateSplitUi();
   updateTimeline();
+  seekTimelineTime(clamp(s.cursor, 0, timelineDuration()));
   renderAudioTracks();
   renderTextOpts();
   savePrefs();
@@ -101,7 +103,6 @@ function editHistory(redo = false) {
   const entry = source.pop();
   if (!entry) return;
   if (entry.kind === 'video') restoreVideoEdit(redo ? entry.after : entry.before);
-  else if (entry.kind === 'sequence-delete') restoreSequenceDelete(entry, !redo);
   else elementEditor?.undo(redo);
   target.push(entry);
   refreshEditButtons();
@@ -155,7 +156,15 @@ function cropAt(t) {
   if (t >= k[k.length - 1].t) return k[k.length - 1];
   let i = 1;
   while (k[i].t < t) i++;
-  const a = k[i - 1], b = k[i], u = smooth((t - a.t) / (b.t - a.t));
+  const a = k[i - 1], b = k[i];
+  if (a.path && b.path) {
+    // Posições do seguimento (muitas e seguidas): curva contínua (Catmull-Rom) — com o "ease" das
+    // posições manuais a moldura travava em cada ◆.
+    const p0 = k[i - 2]?.path ? k[i - 2] : a, p3 = k[i + 1]?.path ? k[i + 1] : b, u = (t - a.t) / (b.t - a.t);
+    const cr = (q0, q1, q2, q3) => 0.5 * (2 * q1 + (-q0 + q2) * u + (2 * q0 - 5 * q1 + 4 * q2 - q3) * u * u + (-q0 + 3 * q1 - 3 * q2 + q3) * u * u * u);
+    return { x: cr(p0.x, a.x, b.x, p3.x), y: cr(p0.y, a.y, b.y, p3.y), w: a.w + (b.w - a.w) * u };
+  }
+  const u = smooth((t - a.t) / (b.t - a.t));
   return { x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u, w: a.w + (b.w - a.w) * u };
 }
 
@@ -196,7 +205,8 @@ function drawMedia(ctx, m, dx, dy, dw, dh) {
   ctx.restore();
 }
 
-function renderFrame(ctx, src, sw, sh, t, W, H, media, elementMedia) {
+// t = tempo da fonte (moldura/câmara); editTime = tempo da régua (textos e imagens).
+function renderFrame(ctx, src, sw, sh, t, W, H, media, elementMedia, editTime = t) {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, W, H);
   if (st.layout === 'original') {
@@ -223,7 +233,7 @@ function renderFrame(ctx, src, sw, sh, t, W, H, media, elementMedia) {
     ctx.drawImage(blurCanvas, -W * 0.05, -H * 0.05, W * 1.1, H * 1.1);
     drawFramedVideo(ctx, src, sw, sh, W, H);
   }
-  drawTexts(ctx, W, H, t, elementMedia);
+  drawTexts(ctx, W, H, editTime, elementMedia);
 }
 
 function normalizeFraming(value) {
@@ -293,6 +303,8 @@ function renderFramingOpts(o) {
 // ---------- pré-visualização (resultado grande ao centro) ----------
 const main = $('main');
 const resultBox = $('#resultBox');
+const resultView = $('#resultView');
+const view = { z: 1, x: 0, y: 0 };      // zoom/deslocamento da vista do resultado (não entra no vídeo)
 
 // A coluna do resultado tem a largura que o formato pede para a altura disponível.
 function sizeResult() {
@@ -304,16 +316,6 @@ function sizeResult() {
 new ResizeObserver(() => { sizeResult(); placeRects(); }).observe(stage);
 
 const sequenceFitCanvas = new OffscreenCanvas(16, 16);
-function sequenceStart(index) {
-  return editDuration() + st.sequenceClips.slice(0, index).reduce((sum, clip) => sum + sequenceClipLength(clip), 0);
-}
-function currentTimelineTime() {
-  if (activeSequenceIndex >= 0) {
-    const clip = st.sequenceClips[activeSequenceIndex];
-    return clip ? sequenceStart(activeSequenceIndex) + clamp(sequenceVideo.currentTime - (clip.trimStart || 0), 0, sequenceClipLength(clip)) : editDuration();
-  }
-  return activeSourceToEdit(video.currentTime || 0);
-}
 function fittedSequenceSource(src) {
   if (sequenceFitCanvas.width !== st.srcW || sequenceFitCanvas.height !== st.srcH) {
     sequenceFitCanvas.width = st.srcW; sequenceFitCanvas.height = st.srcH;
@@ -325,82 +327,121 @@ function fittedSequenceSource(src) {
   ctx.drawImage(src, (st.srcW - w) / 2, (st.srcH - h) / 2, w, h);
   return sequenceFitCanvas;
 }
-function activateSequenceClip(index, offset = 0, autoplay = false) {
-  const clip = st.sequenceClips[index], media = clip && libItem(clip.mediaId);
-  if (!clip || !media?.blob) return false;
-  video.pause();
-  if (activeSequenceIndex !== index || !sequenceVideo.src) {
-    sequenceVideo.pause();
-    if (sequenceURL) URL.revokeObjectURL(sequenceURL);
-    sequenceURL = URL.createObjectURL(media.sourceBlob || media.blob);
-    sequenceVideo.src = sequenceURL;
-  }
-  activeSequenceIndex = index;
-  st.audioSel = null; elementEditor?.select(null);
-  video.hidden = true; sequenceVideo.hidden = false; overlay.hidden = true;
-  const seek = () => {
-    sequenceVideo.currentTime = clamp((clip.trimStart || 0) + offset, clip.trimStart || 0, Math.max(clip.trimStart || 0, (clip.trimEnd ?? clip.dur) - .01));
-    if (autoplay) sequenceVideo.play().catch(() => {});
-  };
-  if (sequenceVideo.readyState >= 1) seek(); else sequenceVideo.addEventListener('loadedmetadata', seek, { once: true });
-  updateTimeline();
-  return true;
-}
-function activatePrimaryClip(time = st.start, autoplay = false) {
-  sequenceVideo.pause(); activeSequenceIndex = -1;
-  sequenceVideo.hidden = true; video.hidden = false; overlay.hidden = false;
-  video.currentTime = clamp(time, 0, st.dur);
-  if (autoplay) video.play().catch(() => {});
-  updateTimeline();
-}
 
+// ---------- reprodução pela timeline ----------
+// st.activePart = o clip da faixa de vídeo que está a tocar (ou onde está o cursor). O tempo da
+// régua sai dele: início do clip na régua + (tempo do <video> − início do trecho). Nunca se procura
+// o clip "pelo tempo da fonte": dois clips podem mostrar o mesmo trecho (duplicado), e antes o
+// player voltava sempre ao 1.º — duplicar parecia dar dois bocados em vez de um clip seguido.
+let sequenceURL = null, sequenceMediaId = null;
+const activeVideo = () => (st.parts[st.activePart]?.mediaId ? sequenceVideo : video);
+// tailTime: cursor parado depois do último clip; tailPlay: a tocar nesse bocado ({t0, from}).
+let tailTime = null, tailPlay = null;
+const isPlaying = () => !!tailPlay || !activeVideo().paused;
+function currentTimelineTime() {
+  if (tailPlay) return Math.min(timelineDuration(), tailPlay.from + (performance.now() - tailPlay.t0) / 1000);
+  if (tailTime != null) return Math.min(tailTime, timelineDuration());
+  const o = rangeOffsets()[st.activePart];
+  if (!o) return 0;
+  const el = o.mediaId ? sequenceVideo : video;
+  return o.editStart + clamp((el.currentTime || 0) - o.start, 0, o.end - o.start);
+}
+// Mostra o clip i no instante src (tempo da fonte desse clip).
+function showPart(i, src, autoplay = false) {
+  const part = st.parts[i];
+  if (!part) return;
+  st.activePart = i;
+  const t = clamp(src ?? part.start, part.start, Math.max(part.start, part.end - 0.001));
+  if (part.mediaId) {
+    const media = libItem(part.mediaId);
+    if (!media?.blob) return;
+    video.pause();
+    if (sequenceMediaId !== part.mediaId) {
+      sequenceVideo.pause();
+      if (sequenceURL) URL.revokeObjectURL(sequenceURL);
+      sequenceURL = URL.createObjectURL(media.sourceBlob || media.blob);
+      sequenceVideo.src = sequenceURL;
+      sequenceMediaId = part.mediaId;
+    }
+    video.hidden = true; sequenceVideo.hidden = false; overlay.hidden = true;
+    const go = () => { sequenceVideo.currentTime = t; if (autoplay) sequenceVideo.play().catch(() => {}); };
+    if (sequenceVideo.readyState >= 1) go(); else sequenceVideo.addEventListener('loadedmetadata', go, { once: true });
+  } else {
+    sequenceVideo.pause();
+    sequenceVideo.hidden = true; video.hidden = false; overlay.hidden = false;
+    if (Math.abs(video.currentTime - t) > 0.002) video.currentTime = t;
+    if (autoplay) video.play().catch(() => {});
+  }
+  markActivePart();
+}
 function resetSequencePreview() {
   sequenceVideo.pause();
   sequenceVideo.removeAttribute('src');
   sequenceVideo.load();
   if (sequenceURL) URL.revokeObjectURL(sequenceURL);
-  sequenceURL = null; activeSequenceIndex = -1;
+  sequenceURL = null; sequenceMediaId = null;
   sequenceVideo.hidden = true; video.hidden = false; overlay.hidden = false;
 }
+function pausePlayback() {
+  if (tailPlay) { tailTime = currentTimelineTime(); tailPlay = null; }
+  video.pause(); sequenceVideo.pause();
+}
+// Entra no bocado depois do último clip: mostra o último frame e (se a tocar) arranca o relógio.
+function enterTail(time, play) {
+  const last = st.parts.length - 1;
+  video.pause(); sequenceVideo.pause();
+  if (last >= 0) showPart(last, st.parts[last].end - 0.001);
+  tailTime = play ? null : time;
+  tailPlay = play ? { t0: performance.now(), from: time } : null;
+}
+// Passa ao clip seguinte quando o atual acaba (sem seek se o seguinte continua o mesmo trecho,
+// para não dar um soluço num corte "sem nada cortado").
+function advancePlayback() {
+  if (tailPlay) {
+    if (currentTimelineTime() >= timelineDuration() - 0.001) { tailTime = timelineDuration(); tailPlay = null; }
+    return;
+  }
+  const part = st.parts[st.activePart], el = activeVideo();
+  // No fim natural do ficheiro o <video> pára sozinho (ended): também conta como "acabou o clip".
+  if (!part || (el.paused && !el.ended) || tailTime != null) return;
+  if (el.currentTime >= part.end - 0.02 || el.ended) {
+    const next = st.parts[st.activePart + 1];
+    if (!next) {
+      if (tailLength() > 0.02) enterTail(editDuration(), true); else pausePlayback();
+      return;
+    }
+    if (!next.mediaId && !part.mediaId && Math.abs(next.start - el.currentTime) < 0.06) { st.activePart++; markActivePart(); }
+    else showPart(st.activePart + 1, next.start, true);
+  } else if (el.currentTime < part.start - 0.1) el.currentTime = part.start;
+}
+
+// Também no timeupdate: se a aba não estiver a desenhar (rAF parado), a reprodução continua certa.
+video.addEventListener('timeupdate', advancePlayback);
+sequenceVideo.addEventListener('timeupdate', advancePlayback);
+sequenceVideo.addEventListener('ended', advancePlayback);
+video.addEventListener('ended', advancePlayback);
 
 function loopPreview() {
   syncMediaTime();
   syncAudioPreview();
-  const activeVideo = activeSequenceIndex >= 0 ? sequenceVideo : video;
-  if (st.mp4 && activeVideo.readyState >= 2) {
+  advancePlayback();
+  const part = st.parts[st.activePart], el = activeVideo();
+  if (st.mp4 && el.readyState >= 2) {
     const { w, h } = outSize();
     const dpr = Math.min(2, devicePixelRatio || 1);
-    const pw = Math.min(w, Math.round(resultBox.clientWidth * dpr)), ph = Math.round((pw * h) / w);
+    // Com zoom na vista, desenha com mais resolução (até à da exportação) para não ficar desfocado.
+    const pw = Math.min(w, Math.round(resultBox.clientWidth * dpr * view.z)), ph = Math.round((pw * h) / w);
     if (pw > 0 && (preview.width !== pw || preview.height !== ph)) { preview.width = pw; preview.height = ph; }
-    const source = activeSequenceIndex >= 0 ? fittedSequenceSource(activeVideo) : activeVideo;
-    const sw = activeSequenceIndex >= 0 ? st.srcW : activeVideo.videoWidth, sh = activeSequenceIndex >= 0 ? st.srcH : activeVideo.videoHeight;
-    renderFrame(pctx, source, sw, sh, currentTimelineTime(), preview.width, preview.height, () => previewMediaFor(st.streamer.mediaId));
+    const source = part?.mediaId ? fittedSequenceSource(el) : el;
+    const sw = part?.mediaId ? st.srcW : el.videoWidth, sh = part?.mediaId ? st.srcH : el.videoHeight;
+    renderFrame(pctx, source, sw, sh, part?.mediaId ? 0 : el.currentTime, preview.width, preview.height, () => previewMediaFor(st.streamer.mediaId), null, currentTimelineTime());
   }
   elementEditor?.update();
   updateSplitUi();
   syncFramingUi();
-  if (activeSequenceIndex >= 0 && !sequenceVideo.paused) {
-    const clip = st.sequenceClips[activeSequenceIndex];
-    if (clip && sequenceVideo.currentTime >= (clip.trimEnd ?? clip.dur) - .01) {
-      if (!activateSequenceClip(activeSequenceIndex + 1, 0, true)) activatePrimaryClip(getRanges()[0]?.start ?? st.start, true);
-    }
-  } else if (activeSequenceIndex < 0 && !video.paused) {
-    const ranges = getRanges();
-    let i = ranges.findIndex(r => video.currentTime >= r.start && video.currentTime < r.end);
-    if (i < 0) {
-      const next = ranges.find(r => r.start > video.currentTime);
-      video.currentTime = next ? next.start : ranges[0]?.start || st.start;
-    } else {
-      st.activePart = i;   // segue o segmento a tocar (desambigua duplicados para activeSourceToEdit)
-      if (video.currentTime >= ranges[i].end - 0.01) {
-        if (ranges[i + 1]) video.currentTime = ranges[i + 1].start;
-        else if (st.sequenceClips.length) activateSequenceClip(0, 0, true);
-        else video.currentTime = ranges[0]?.start ?? st.start;
-      }
-    }
-  }
   if (st.layout === 'crop' || drag) placeRects();                                    // a moldura segue as posições
   updateHead();
+  inlineText?.place();
   requestAnimationFrame(loopPreview);
 }
 
@@ -524,90 +565,93 @@ function addCropKeyAt(t, r) {
   renderKeys();
 }
 
-// ---------- barra de tempo ----------
+// ---------- timeline: modelo ----------
+// A faixa de vídeo é uma lista de clips encostados (st.parts), como em qualquer editor:
+//   {start, end}          trecho do vídeo principal (segundos da fonte)
+//   {start, end, mediaId} trecho de um vídeo da biblioteca («+ Vídeo»)
+// A posição na régua é só a ordem: o clip i começa onde acaba o i−1 (sem buracos; apagar fecha o
+// espaço). Esticar as pontas de um clip recupera o que foi cortado. Textos, imagens e música vivem
+// no tempo da régua (segundos do vídeo final), não da fonte.
 const tl = $('#timeline');
-let activeSequenceIndex = -1, sequenceURL = null;
-function rippleRemovedBetween(a, b) {
-  let removed = 0;
-  for (const cut of st.rippleCuts || []) {
-    const s = Math.max(a, cut.start), e = Math.min(b, cut.end);
-    if (e > s) removed += e - s;
-  }
-  return removed;
-}
-// A ordem de exportação (getRanges(), por índice) é que define a posição na régua — não a ordem
-// cronológica da fonte. É isto que permite arrastar um segmento para outra posição e vê-lo mesmo
-// deslocado na régua (antes só a numeração "ordem de exportação N" mudava, a posição não).
-// Entre segmentos array-adjacentes que ainda seguem a ordem cronológica (o caso normal, sem
-// arrastar nada), mantém-se o espaço do que foi cortado — para o "↶ Repor trecho" continuar a
-// fazer sentido. Entre segmentos fora de ordem (foram arrastados), encosta-se um ao outro: não há
-// "espaço cortado" nenhum para repor entre dois troços que nunca foram vizinhos na fonte.
+const partLength = (p) => Math.max(0, p.end - p.start);
+const partMax = (p) => (p.mediaId ? libItem(p.mediaId)?.dur || p.end : st.dur);
+const partName = (p) => (p.mediaId ? libItem(p.mediaId)?.name || 'Vídeo' : 'Clip');
+function getRanges() { return st.parts; }
 function rangeOffsets() {
-  let cursor = 0, prevEnd = null;
-  return getRanges().map((r) => {
-    const len = Math.max(0, r.end - r.start);
-    const editStart = prevEnd != null && r.start >= prevEnd - 0.05
-      ? cursor + Math.max(0, (r.start - prevEnd) - rippleRemovedBetween(prevEnd, r.start))
-      : cursor;
-    const editEnd = editStart + len;
-    cursor = editEnd;
-    prevEnd = r.end;
-    return { start: r.start, end: r.end, editStart, editEnd };
+  let cursor = 0;
+  return st.parts.map((p) => {
+    const editStart = cursor;
+    cursor += partLength(p);
+    return { start: p.start, end: p.end, mediaId: p.mediaId, editStart, editEnd: cursor };
   });
 }
-function editDuration() {
+function editDuration() { return st.parts.reduce((sum, p) => sum + partLength(p), 0); }
+// Duração do vídeo final: os clips, ou mais, se um elemento «Ficheiro» (imagem/vídeo) com fim
+// próprio for para lá do último clip — como num editor normal, o vídeo dura até à última coisa na
+// timeline. Nesse bocado extra fica o último frame do clip parado por trás.
+const mediaElementsEnd = () => st.images.reduce((end, e) => (e.out != null ? Math.max(end, e.out) : end), 0);
+const timelineDuration = () => Math.max(editDuration(), mediaElementsEnd());
+const tailLength = () => Math.max(0, timelineDuration() - editDuration());
+// Instante da régua → clip e tempo da fonte.
+function locate(time) {
   const offs = rangeOffsets();
-  return offs.length ? offs.at(-1).editEnd : 0;
+  if (!offs.length) return null;
+  const t = clamp(time, 0, offs.at(-1).editEnd);
+  let i = offs.findIndex((o) => t < o.editEnd - 1e-6);
+  if (i < 0) i = offs.length - 1;
+  return { i, src: offs[i].start + clamp(t - offs[i].editStart, 0, offs[i].end - offs[i].start) };
 }
-// Sem ocorrência preferida, usa a 1ª que bate com o tempo (um segmento duplicado repete o mesmo
-// tempo de origem lá para trás — só ambíguo para posicionar elementos/◆, nunca para o cursor).
+// Tempo da fonte principal → régua (para os ◆ da moldura). Prefere o clip ativo (um trecho
+// duplicado aparece mais do que uma vez).
 function sourceToEdit(time, offs = rangeOffsets()) {
-  if (!offs.length) return 0;
-  const hit = offs.find((r) => time >= r.start - 0.001 && time <= r.end + 0.001);
+  const main = offs.filter((o) => !o.mediaId);
+  if (!main.length) return 0;
+  const active = offs[st.activePart];
+  if (active && !active.mediaId && time >= active.start - 0.001 && time <= active.end + 0.001) return active.editStart + clamp(time - active.start, 0, active.end - active.start);
+  const hit = main.find((o) => time >= o.start - 0.001 && time <= o.end + 0.001);
   if (hit) return hit.editStart + clamp(time - hit.start, 0, hit.end - hit.start);
-  let best = offs[0], bestDist = Infinity;
-  for (const r of offs) {
-    const dist = time < r.start ? r.start - time : time - r.end;
-    if (dist < bestDist) { bestDist = dist; best = r; }
+  let best = main[0], bestDist = Infinity;
+  for (const o of main) {
+    const d = time < o.start ? o.start - time : time - o.end;
+    if (d < bestDist) { bestDist = d; best = o; }
   }
   return time < best.start ? best.editStart : best.editEnd;
 }
-function editToSource(time) {
-  const offs = rangeOffsets();
-  if (!offs.length) return 0;
-  const hit = offs.find((r) => time >= r.editStart - 0.001 && time <= r.editEnd + 0.001);
-  if (hit) return hit.start + clamp(time - hit.editStart, 0, hit.end - hit.start);
-  return time < 0 ? offs[0].start : offs.at(-1).end;
-}
-// Posição do cursor: prefere a ocorrência ativa (st.activePart) quando ela contém o tempo atual,
-// para desambiguar segmentos duplicados — sourceToEdit sozinho escolheria sempre a 1ª ocorrência.
-function activeSourceToEdit(time) {
-  const offs = rangeOffsets(), active = offs[st.activePart];
-  if (active && time >= active.start - 0.02 && time <= active.end + 0.02) {
-    return active.editStart + clamp(time - active.start, 0, active.end - active.start);
-  }
-  return sourceToEdit(time, offs);
-}
-const sequenceClipLength = clip => Math.max(0, (clip.trimEnd ?? clip.dur) - (clip.trimStart || 0));
-const queuedDuration = () => st.sequenceClips.reduce((sum, clip) => sum + sequenceClipLength(clip), 0);
-const timelineDuration = () => editDuration() + queuedDuration();
-const editPct = (time) => (timelineDuration() ? (time / timelineDuration()) * 100 : 0) + '%';
-const tAt = (clientX) => { const r = tl.getBoundingClientRect(); return clamp((clientX - r.left) / r.width, 0, 1) * timelineDuration(); };
-const pct = (sourceTime) => editPct(sourceToEdit(sourceTime));
 
-function getRanges() {
-  const parts = st.parts?.length ? st.parts : [{ start: st.start, end: st.end }];
-  return parts.map(r => ({ start: Math.max(st.start, r.start), end: Math.min(st.end, r.end) }))
-    .filter(r => r.end - r.start > 0.05);
+// Escala da timeline: píxeis por segundo (zoom). Fica fixa quando a duração muda — duplicar ou
+// apagar um clip não "encolhe" tudo; a faixa cresce e aparece a barra de deslocamento.
+const TRACK_LABEL_W = 102;
+const tracksWrap = $('.tracksWrap'), tracksInner = $('#tracksInner');
+let pxPerSec = 0;
+const visibleLaneWidth = () => Math.max(120, tracksWrap.clientWidth - TRACK_LABEL_W - 10);
+const fitPxPerSec = () => (visibleLaneWidth() - 24) / Math.max(1, timelineDuration());
+const laneWidth = () => Math.max(visibleLaneWidth(), timelineDuration() * (pxPerSec || fitPxPerSec()) + 24);
+const laneSpan = () => laneWidth() / (pxPerSec || fitPxPerSec());   // segundos que a faixa inteira representa
+function applyTimelineScale() {
+  if (!pxPerSec) pxPerSec = fitPxPerSec();
+  tracksInner.style.width = `${TRACK_LABEL_W + laneWidth()}px`;
 }
-function rangeOccurrences(ranges, index) {
-  const range = ranges[index];
-  if (!range) return { count: 0, position: -1 };
-  const matches = ranges.map((other, i) => ({ other, i }))
-    .filter(({ other }) => Math.abs(other.start - range.start) < 0.01 && Math.abs(other.end - range.end) < 0.01)
-    .map(({ i }) => i);
-  return { count: matches.length, position: matches.indexOf(index) };
+function zoomTimeline(factor, anchorClientX = null) {
+  if (!st.mp4) return;
+  const lane = tl.getBoundingClientRect();
+  const anchorX = anchorClientX ?? lane.left + Math.min(lane.width, tracksWrap.clientWidth - TRACK_LABEL_W) / 2;
+  const anchorTime = (anchorX - lane.left) / lane.width * laneSpan();
+  const { lo, hi } = zoomRange();
+  pxPerSec = clamp((pxPerSec || fitPxPerSec()) * factor, lo, hi);
+  updateTimeline();
+  const newLane = tl.getBoundingClientRect();
+  tracksWrap.scrollLeft += (newLane.left + anchorTime / laneSpan() * newLane.width) - anchorX;
 }
+function fitTimeline() { pxPerSec = fitPxPerSec(); updateTimeline(); tracksWrap.scrollLeft = 0; }
+// Barra de zoom (escala logarítmica): 0 = metade do "ver tudo", 100 = 400 px por segundo.
+const zoomRange = () => { const fit = fitPxPerSec(); return { lo: fit * 0.5, hi: Math.max(fit * 0.6, 400) }; };
+function syncZoomSlider() {
+  const { lo, hi } = zoomRange(), z = clamp(pxPerSec || fitPxPerSec(), lo, hi);
+  $('#tlZoom').value = String(Math.round(Math.log(z / lo) / Math.log(hi / lo) * 100));
+}
+const editPct = (time) => (time / laneSpan()) * 100 + '%';
+const tAt = (clientX) => { const r = tl.getBoundingClientRect(); return clamp((clientX - r.left) / r.width * laneSpan(), 0, timelineDuration()); };
+const pct = (sourceTime) => editPct(sourceToEdit(sourceTime));
 
 // Faixas de música usam o relógio visível da timeline. O ficheiro nunca é
 // alterado: start posiciona-o; trimStart/trimEnd escolhem a parte que se ouve.
@@ -649,7 +693,7 @@ function audioPreviewFor(track) {
 }
 function syncAudioPreview(force = false) {
   if (!st.mp4) return;
-  const now = currentTimelineTime(), paused = activeSequenceIndex >= 0 ? sequenceVideo.paused : video.paused;
+  const now = currentTimelineTime(), paused = !isPlaying();
   for (const track of st.audioTracks) {
     const p = audioPreviewFor(track);
     if (!p) continue;
@@ -702,71 +746,11 @@ function splitAudio() {
   renderAudioTracks(); renderTextOpts(); recordVideoEdit(before);
   return true;
 }
-function removeSequenceClip(index = activeSequenceIndex) {
-  const clip = st.sequenceClips[index];
-  if (!clip || st.busy) return;
-  const mediaId = clip.mediaId, media = libItem(mediaId);
-  const entry = { kind: 'sequence-delete', index, clip: structuredClone(clip), media,
-    audioBefore: structuredClone(st.audioTracks), audioSelBefore: st.audioSel };
-  st.sequenceClips.splice(index, 1);
-  if (!st.sequenceClips.some(item => item.mediaId === mediaId)) {
-    st.library = st.library.filter(item => item.id !== mediaId);
-    deleteMedia(mediaId).catch(() => {});
-  }
-  if (activeSequenceIndex === index) activatePrimaryClip(getRanges().at(-1)?.end ?? st.start, false);
-  else activeSequenceIndex = Math.min(activeSequenceIndex, st.sequenceClips.length - 1);
-  normalizeAudioTracks(); updateTimeline(); renderTextOpts(); saveSession();
-  entry.audioAfter = structuredClone(st.audioTracks); entry.audioSelAfter = st.audioSel;
-  recordEdit(entry);
-  setStatus(`«${clip.name}» removido da sequência.`);
-}
-
-function restoreSequenceDelete(entry, restore) {
-  video.pause(); sequenceVideo.pause();
-  if (restore) {
-    if (entry.media && !libItem(entry.media.id)) {
-      st.library.push(entry.media);
-      putMedia(entry.media).catch(error => console.warn('restaurar vídeo da sequência', error));
-    }
-    if (!st.sequenceClips.some(clip => clip.id === entry.clip.id)) {
-      st.sequenceClips.splice(clamp(entry.index, 0, st.sequenceClips.length), 0, structuredClone(entry.clip));
-    }
-    st.audioTracks = structuredClone(entry.audioBefore || st.audioTracks);
-    st.audioSel = entry.audioSelBefore || null;
-    activateSequenceClip(st.sequenceClips.findIndex(clip => clip.id === entry.clip.id), 0, false);
-    setStatus(`«${entry.clip.name}» restaurado.`);
-  } else {
-    const index = st.sequenceClips.findIndex(clip => clip.id === entry.clip.id);
-    if (index >= 0) st.sequenceClips.splice(index, 1);
-    if (!st.sequenceClips.some(clip => clip.mediaId === entry.clip.mediaId)) {
-      st.library = st.library.filter(item => item.id !== entry.clip.mediaId);
-      deleteMedia(entry.clip.mediaId).catch(() => {});
-    }
-    st.audioTracks = structuredClone(entry.audioAfter || st.audioTracks);
-    st.audioSel = entry.audioSelAfter || null;
-    if (activeSequenceIndex === index || !st.sequenceClips[activeSequenceIndex]) activatePrimaryClip(getRanges().at(-1)?.end ?? st.start, false);
-    else if (index >= 0 && activeSequenceIndex > index) activeSequenceIndex--;
-    setStatus(`«${entry.clip.name}» removido novamente.`);
-  }
-  syncAudioPreview(true); updateTimeline(); renderAudioTracks(); renderTextOpts(); saveSession();
-}
-function splitSequenceClip() {
-  const clip = st.sequenceClips[activeSequenceIndex];
-  if (!clip) return false;
-  const cut = sequenceVideo.currentTime;
-  if (cut <= (clip.trimStart || 0) + .05 || cut >= (clip.trimEnd ?? clip.dur) - .05) return false;
-  const right = { ...clip, id: crypto.randomUUID(), trimStart: cut };
-  clip.trimEnd = cut;
-  st.sequenceClips.splice(activeSequenceIndex + 1, 0, right);
-  activeSequenceIndex++;
-  activateSequenceClip(activeSequenceIndex, 0, false); saveSession();
-  return true;
-}
 function renderAudioTracks() {
   const wrap = $('#audioTracks');
   if (!wrap) return;
   normalizeAudioTracks();
-  const duration = timelineDuration() || 1, pctTime = time => clamp(time / duration * 100, 0, 100);
+  const span = laneSpan() || 1, pctTime = time => clamp(time / span * 100, 0, 100);
   wrap.innerHTML = st.audioTracks.map(track => {
     const media = libItem(track.mediaId), end = audioEnd(track);
     return `<div class="audioTrackRow"><span class="trackLabel"><button class="audioMute" data-audio-mute="${esc(track.id)}" title="${track.muted ? 'Ativar' : 'Silenciar'} ${esc(media?.name || 'áudio')}">${track.muted ? '🔇' : '♪'}</button><span>${esc(media?.name || 'Áudio')}</span></span><div class="audioLane"><div class="audioBlock${track.id === st.audioSel ? ' on' : ''}${track.muted ? ' muted' : ''}" data-audio="${esc(track.id)}" style="left:${pctTime(track.start)}%;width:${Math.max(.2, pctTime(end - track.start))}%" role="button" tabindex="0" aria-label="${esc(media?.name || 'Áudio')}: ${fmt(track.start)} a ${fmt(end)}"><span class="audioGrip" data-audio-edge="in"></span><span class="audioWave">${esc(media?.name || 'Áudio')}</span><span class="audioGrip end" data-audio-edge="out"></span></div></div></div>`;
@@ -791,21 +775,23 @@ $('#audioTracks').addEventListener('pointerdown', event => {
   if (!block || event.button !== 0 || st.busy) return;
   const track = st.audioTracks.find(item => item.id === block.dataset.audio);
   if (!track) return;
-  event.preventDefault(); event.stopPropagation(); video.pause(); selectAudio(track.id, false, true);
+  event.preventDefault(); event.stopPropagation(); pausePlayback(); if (partSel >= 0) selectPart(-1); selectAudio(track.id, false, true);
   const before = beginVideoEdit(), initial = { ...track }, lane = block.parentElement.getBoundingClientRect();
-  const edge = event.target.dataset.audioEdge, x0 = event.clientX, duration = timelineDuration();
+  const edge = event.target.dataset.audioEdge, x0 = event.clientX, duration = timelineDuration(), span = laneSpan();
   block.setPointerCapture(event.pointerId);
   const move = ev => {
-    const dt = (ev.clientX - x0) / lane.width * duration;
+    const dt = (ev.clientX - x0) / lane.width * span;
     if (edge === 'in') {
-      const next = clamp(initial.start + dt, 0, initial.start + audioLength(initial) - .05);
+      // Esticar para a esquerda só até ao início do ficheiro (trimStart nunca negativo): antes
+      // continuava para lá dele e a faixa ficava com um trimStart negativo — posição e som errados.
+      const next = clamp(initial.start + dt, Math.max(0, initial.start - initial.trimStart), initial.start + audioLength(initial) - .05);
       track.trimStart = initial.trimStart + next - initial.start; track.start = next;
     } else if (edge === 'out') {
       track.trimEnd = clamp(initial.trimEnd + dt, initial.trimStart + .05, libItem(track.mediaId)?.dur || initial.trimEnd);
     } else track.start = clamp(initial.start + dt, 0, Math.max(0, duration - .05));
     const endTime = audioEnd(track);
-    block.style.left = `${clamp(track.start / duration * 100, 0, 100)}%`;
-    block.style.width = `${Math.max(.2, clamp((endTime - track.start) / duration * 100, 0, 100))}%`;
+    block.style.left = `${clamp(track.start / span * 100, 0, 100)}%`;
+    block.style.width = `${Math.max(.2, clamp((endTime - track.start) / span * 100, 0, 100))}%`;
     syncAudioPreview(true);
   };
   const end = ev => {
@@ -816,190 +802,227 @@ $('#audioTracks').addEventListener('pointerdown', event => {
   block.addEventListener('pointermove', move); block.addEventListener('pointerup', end); block.addEventListener('pointercancel', end);
 });
 
+// ---------- timeline: interface ----------
+// partSel = clip selecionado na faixa de vídeo (−1 = nenhum). É independente do clip a tocar.
+let partSel = -1;
 function updateTimelineTools() {
   const hasElement = !!elementEditor?.selected();
   const hasAudio = !!audioItem();
-  const hasSequence = activeSequenceIndex >= 0 && !!st.sequenceClips[activeSequenceIndex];
+  const hasPart = partSel >= 0 && !!st.parts[partSel];
   const removeButton = $('#removeSegment');
-  removeButton.hidden = hasElement || hasAudio || hasSequence ? false : getRanges().length < 2;
-  removeButton.disabled = st.busy || (!hasElement && !hasAudio && !hasSequence && getRanges().length < 2);
-  removeButton.querySelector('span').textContent = hasSequence ? 'Apagar vídeo' : hasAudio ? 'Apagar áudio' : hasElement ? 'Apagar elemento' : 'Remover';
-  removeButton.querySelector('.menuChevron').toggleAttribute('hidden', hasElement || hasAudio || hasSequence);
-  removeButton.title = hasSequence ? 'Apagar vídeo adicional (Delete)' : hasAudio ? 'Apagar faixa de áudio (Delete)' : hasElement ? 'Apagar elemento selecionado (Delete)' : 'Remover segmento selecionado';
+  const canDeletePart = hasPart && st.parts.length > 1;
+  removeButton.hidden = !(hasElement || hasAudio || hasPart);
+  removeButton.disabled = st.busy || !(hasElement || hasAudio || canDeletePart);
+  removeButton.querySelector('span').textContent = hasAudio ? 'Apagar áudio' : hasElement ? 'Apagar elemento' : 'Apagar clip';
+  removeButton.title = hasAudio ? 'Apagar faixa de áudio (Delete)' : hasElement ? 'Apagar elemento selecionado (Delete)'
+    : canDeletePart ? 'Apagar o clip selecionado — o resto encosta (Delete)' : 'É o único clip da faixa';
   removeButton.setAttribute('aria-label', removeButton.title);
-  removeButton.setAttribute('aria-haspopup', hasElement || hasAudio || hasSequence ? 'false' : 'menu');
-  $('#setIn').title = hasSequence ? 'Cortar início do vídeo no cursor (I)' : hasAudio ? 'Cortar início do áudio no cursor (I)' : hasElement ? 'Marcar início do elemento selecionado (I)' : 'Marcar início (I)';
+  $('#setIn').title = hasAudio ? 'Cortar início do áudio no cursor (I)' : hasElement ? 'Marcar início do elemento selecionado (I)' : 'Cortar o início do clip no cursor (I)';
+  $('#setOut').title = hasAudio ? 'Cortar fim do áudio no cursor (O)' : hasElement ? 'Marcar fim do elemento selecionado (O)' : 'Cortar o fim do clip no cursor (O)';
   $('#setIn').setAttribute('aria-label', $('#setIn').title);
-  $('#setOut').title = hasSequence ? 'Cortar fim do vídeo no cursor (O)' : hasAudio ? 'Cortar fim do áudio no cursor (O)' : hasElement ? 'Marcar fim do elemento selecionado (O)' : 'Marcar fim (O)';
   $('#setOut').setAttribute('aria-label', $('#setOut').title);
-  $('#splitClip').title = hasSequence ? 'Dividir vídeo no cursor (Ctrl+B)' : hasAudio ? 'Dividir áudio no cursor (Ctrl+B)' : hasElement ? 'Dividir elemento no cursor (Ctrl+B)' : 'Dividir segmento (Ctrl+B)';
-  $('#splitClip').setAttribute('aria-label', $('#splitClip').title);
+}
+function selectPart(i, { seek = false } = {}) {
+  partSel = st.parts[i] ? i : -1;
+  if (partSel >= 0) {
+    if (st.audioSel) { st.audioSel = null; renderAudioTracks(); }
+    if (elementEditor?.selected()) elementEditor.select(null);
+  }
+  $('#ranges').querySelectorAll('.range').forEach((b) => b.classList.toggle('active', +b.dataset.index === partSel));
+  if (seek && partSel >= 0) seekTimelineTime(rangeOffsets()[partSel].editStart);
+  updateTimelineTools();
+}
+function markActivePart() {
+  $('#ranges').querySelectorAll('.range').forEach((b) => b.classList.toggle('current', +b.dataset.index === st.activePart));
 }
 
-function selectPartAt(t) {
-  const ranges = getRanges();
-  if (!ranges.length) return;
-  const active = ranges[st.activePart];
-  if (active && t >= active.start && t <= active.end) return active;
-  let i = ranges.findIndex(r => t >= r.start && t <= r.end);
-  if (i < 0) i = ranges.reduce((best, r, n) => {
-    const distance = Math.min(Math.abs(t - r.start), Math.abs(t - r.end));
-    return distance < best.distance ? { index: n, distance } : best;
-  }, { index: 0, distance: Infinity }).index;
-  st.activePart = i;
-  return ranges[i];
+function niceStep(secondsPerTick) {
+  return [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600].find((s) => s >= secondsPerTick) || 600;
+}
+const fmtTick = (t) => { const m = Math.floor(t / 60), s = Math.round(t - m * 60); return `${m}:${String(s).padStart(2, '0')}`; };
+function renderRuler() {
+  const ruler = $('#elementRuler'), span = laneSpan(), pps = laneWidth() / span;
+  if (!st.mp4) { ruler.innerHTML = ''; return; }
+  const step = niceStep(70 / pps), minor = step / (step >= 10 ? 5 : 2);
+  let html = '';
+  for (let t = 0; t <= span + 1e-6; t += minor) {
+    const major = Math.abs(t / step - Math.round(t / step)) < 1e-6;
+    html += `<span class="tick${major ? ' major' : ''}" style="left:${(t / span) * 100}%">${major ? fmtTick(t) : ''}</span>`;
+  }
+  html += `<span class="rulerEnd" style="left:${(timelineDuration() / span) * 100}%" title="Fim do vídeo"></span>`;
+  ruler.innerHTML = html;
+}
+
+function renderVideoTrack() {
+  const wrap = $('#ranges');
+  const offs = rangeOffsets();
+  wrap.replaceChildren(...offs.map((o, i) => {
+    const b = document.createElement('div');
+    b.className = 'range' + (o.mediaId ? ' sequenceRange' : '') + (i === partSel ? ' active' : '') + (i === st.activePart ? ' current' : '');
+    b.dataset.index = i;
+    b.tabIndex = 0;
+    b.setAttribute('role', 'button');
+    const name = partName(st.parts[i]);
+    b.title = `${name} ${i + 1}: ${fmt(o.editStart)} – ${fmt(o.editEnd)} (fonte ${fmt(o.start)} – ${fmt(o.end)}) · arrasta para mudar de sítio · puxa as pontas para cortar/recuperar`;
+    b.setAttribute('aria-label', b.title);
+    b.innerHTML = `<span class="segGrip in" data-seg-edge="in" title="Puxa para cortar ou recuperar o início"></span><span class="segLabel">${esc(name)} · ${fmt(o.end - o.start)}</span><span class="segGrip out" data-seg-edge="out" title="Puxa para cortar ou recuperar o fim"></span>`;
+    return b;
+  }));
+  // Depois do último clip, se um ficheiro for mais longo: o último frame fica parado até ele acabar.
+  const tail = tailLength();
+  if (tail > 0.02) {
+    const t = document.createElement('div');
+    t.className = 'tailRange';
+    t.style.left = editPct(editDuration());
+    t.style.width = editPct(tail);
+    t.title = `Último frame parado durante ${fmt(tail)} — um ficheiro na timeline vai até aqui`;
+    t.textContent = 'Último frame';
+    wrap.append(t);
+  }
+  layoutVideoTrack();
+}
+// Só mexe nas posições dos blocos que já existem (serve a meio de um arrastar sem destruir o nó
+// agarrado — ver armadilha no CLAUDE.md). span fixo durante o gesto para a escala não saltar.
+function layoutVideoTrack(span = laneSpan()) {
+  const offs = rangeOffsets();
+  $('#ranges').querySelectorAll('.range').forEach((b) => {
+    const o = offs[+b.dataset.index];
+    if (!o) return;
+    b.style.left = `${(o.editStart / span) * 100}%`;
+    b.style.width = `${((o.editEnd - o.editStart) / span) * 100}%`;
+    const label = b.querySelector('.segLabel');
+    if (label) label.textContent = `${partName(st.parts[+b.dataset.index])} · ${fmt(o.end - o.start)}`;
+  });
 }
 
 function updateTimeline() {
+  applyTimelineScale();
+  st.activePart = clamp(st.activePart, 0, Math.max(0, st.parts.length - 1));
+  if (partSel >= st.parts.length) partSel = -1;
   elementEditor?.renderTracks();
   renderAudioTracks();
-  const ranges = getRanges(), offs = rangeOffsets(), wrap = $('#ranges');
-  st.activePart = clamp(st.activePart, 0, Math.max(0, ranges.length - 1));
-  const editDur = offs.length ? offs.at(-1).editEnd : 0, dur = (editDur + queuedDuration()) || 1;
-  const editLeftPct = (t) => `${t / dur * 100}%`;
-  const editWidthPct = (a, b) => `${Math.max(0, (b - a) / dur * 100)}%`;
-  const gaps = [], marks = [];
-  // start/end em atIndex indicam onde reinserir no array (st.parts) se a pessoa repuser o troço.
-  const addGap = (editStart, editEnd, srcStart, srcEnd, atIndex) => {
-    const removed = document.createElement('button');
-    removed.type = 'button';
-    removed.className = 'cutGap';
-    removed.style.left = editLeftPct(editStart);
-    removed.style.width = editWidthPct(editStart, editEnd);
-    removed.dataset.start = srcStart;
-    removed.dataset.end = srcEnd;
-    removed.title = `Repor trecho removido: ${fmt(srcStart)} – ${fmt(srcEnd)}`;
-    removed.setAttribute('aria-label', removed.title);
-    const gapWidth = (editEnd - editStart) / dur * tl.clientWidth;
-    removed.textContent = gapWidth >= 78 ? '↶ Repor trecho' : '↶';
-    removed.addEventListener('pointerdown', e => e.stopPropagation());
-    removed.addEventListener('click', e => { e.stopPropagation(); restoreGap(srcStart, srcEnd, atIndex); });
-    gaps.push(removed);
-  };
-  const addRippleMarker = (editPos, cut, atIndex) => {
-    const marker = document.createElement('button');
-    marker.type = 'button';
-    marker.className = 'cutGap rippleCut';
-    const position = clamp(editPos / dur * 100, 0, 100);
-    marker.style.left = position >= 100 ? 'calc(100% - 16px)' : position <= 0 ? '0%' : `calc(${position}% - 8px)`;
-    marker.style.width = '16px';
-    marker.style.marginLeft = '-8px';
-    marker.dataset.start = cut.start;
-    marker.dataset.end = cut.end;
-    marker.title = `Repor espaço fechado: ${fmt(cut.start)} – ${fmt(cut.end)}`;
-    marker.setAttribute('aria-label', marker.title);
-    marker.textContent = '↶';
-    marker.addEventListener('pointerdown', e => e.stopPropagation());
-    marker.addEventListener('click', e => { e.stopPropagation(); restoreGap(cut.start, cut.end, atIndex); });
-    gaps.push(marker);
-  };
-  // Preenche [srcStart,srcEnd] (fonte), que ocupa [editStart0,editEnd0] na régua, com os cortes
-  // fechados (ripple) lá dentro e o resto como troço simples por repor.
-  const addRemovedInterval = (srcStart, srcEnd, editStart0, editEnd0, atIndex) => {
-    let cursorSrc = srcStart, cursorEdit = editStart0;
-    const span = srcEnd - srcStart || 1;
-    const editAt = (s) => editStart0 + (editEnd0 - editStart0) * clamp((s - srcStart) / span, 0, 1);
-    for (const cut of [...st.rippleCuts].sort((a, b) => a.start - b.start)) {
-      if (cut.end <= cursorSrc || cut.start >= srcEnd) continue;
-      if (cut.start - cursorSrc > 0.05) addGap(cursorEdit, editAt(cut.start), cursorSrc, cut.start, atIndex);
-      addRippleMarker(editAt(cut.start), cut, atIndex);
-      cursorSrc = Math.max(cursorSrc, cut.end);
-      cursorEdit = editAt(cursorSrc);
-    }
-    if (srcEnd - cursorSrc > 0.05) addGap(cursorEdit, editEnd0, cursorSrc, srcEnd, atIndex);
-  };
-  // "Reordenado" (arrastado) não tem um trecho cortado que faça sentido repor entre os dois — só
-  // se mostra o "Repor trecho"/divisão quando os vizinhos no array também são vizinhos na fonte.
-  const chronoFirst = ranges.length && ranges[0].start <= Math.min(...ranges.map(r => r.start)) + 0.01;
-  const chronoLast = ranges.length && ranges.at(-1).end >= Math.max(...ranges.map(r => r.end)) - 0.01;
-  if (chronoFirst && ranges[0].start - st.start > 0.05) addRemovedInterval(st.start, ranges[0].start, 0, offs[0].editStart, 0);
-  for (let i = 1; i < ranges.length; i++) {
-    const previous = ranges[i - 1], next = ranges[i], gap = next.start - previous.end;
-    if (next.start < previous.end - 0.05) continue;   // ordem trocada: encostam-se, sem espaço a repor
-    if (gap > 0.05) {
-      addRemovedInterval(previous.end, next.start, offs[i - 1].editEnd, offs[i].editStart, i);
-    } else {
-      const marker = document.createElement('span');
-      marker.className = 'splitMarker';
-      marker.style.left = editLeftPct(offs[i - 1].editEnd);
-      marker.title = `Divisão entre segmentos ${i} e ${i + 1}`;
-      marker.setAttribute('aria-hidden', 'true');
-      marks.push(marker);
-    }
-  }
-  if (chronoLast && st.end - ranges.at(-1).end > 0.05) addRemovedInterval(ranges.at(-1).end, st.end, offs.at(-1).editEnd, editDur, ranges.length);
-  const clips = ranges.map((r, i) => {
-    const occurrence = rangeOccurrences(ranges, i), repeated = occurrence.count > 1;
-    const range = document.createElement('button');
-    range.type = 'button';
-    range.className = 'range' + (i === st.activePart ? ' active' : '') + (repeated && occurrence.position > 0 ? ' duplicate' : '');
-    range.style.left = editLeftPct(offs[i].editStart);
-    range.style.width = editWidthPct(offs[i].editStart, offs[i].editEnd);
-    if (ranges.length > 1) range.draggable = true;   // arrastar troca a ordem de exportação
-    const copyLabel = repeated ? (occurrence.position ? ` · cópia ${occurrence.position + 1}/${occurrence.count}` : ` · origem de ${occurrence.count} ocorrências`) : '';
-    range.title = `Segmento ${i + 1}${copyLabel}: ${fmt(r.start)} – ${fmt(r.end)} · ordem de exportação ${i + 1}` + (ranges.length > 1 ? ' · arrasta para reordenar' : '');
-    range.setAttribute('aria-label', range.title);
-    range.setAttribute('aria-pressed', String(i === st.activePart));
-    range.textContent = `${i + 1} · ${fmt(r.end - r.start)}`;
-    range.addEventListener('pointerdown', e => e.stopPropagation());
-    range.addEventListener('click', e => {
-      e.stopPropagation();
-      if (activeSequenceIndex >= 0) activatePrimaryClip(r.start, false);
-      st.activePart = i;
-      st.audioSel = null;
-      elementEditor?.select(null);
-      video.pause();
-      video.currentTime = e.detail === 0 ? r.start : clamp(editToSource(tAt(e.clientX)), r.start, r.end);
-      updateTimeline();
-    });
-    return range;
-  });
-  let sequenceOffset = editDuration();
-  const queued = st.sequenceClips.map((clip, i) => {
-    const start = sequenceOffset, length = sequenceClipLength(clip);
-    sequenceOffset += length;
-    const range = document.createElement('button');
-    range.type = 'button';
-    range.className = 'range sequenceRange' + (i === activeSequenceIndex ? ' active' : '');
-    range.style.left = editPct(start);
-    range.style.width = editPct(length);
-    range.title = `${clip.name}: ${fmt(start)} – ${fmt(start + length)} · vídeo pendente`;
-    range.setAttribute('aria-label', range.title);
-    range.setAttribute('aria-pressed', String(i === activeSequenceIndex));
-    range.textContent = `＋ ${clip.name} · ${fmt(length)}`;
-    range.addEventListener('pointerdown', event => event.stopPropagation());
-    range.addEventListener('click', event => { event.stopPropagation(); activateSequenceClip(i, 0, false); });
-    return range;
-  });
-  wrap.replaceChildren(...gaps, ...clips, ...marks, ...queued);
-  $('#hIn').style.left = pct(st.start);
-  $('#hOut').style.left = pct(st.end);
-  for (const id of ['play', 'setIn', 'setOut', 'splitClip', 'addVideo', 'addAudio']) $('#' + id).disabled = !st.mp4 || st.busy;
+  renderRuler();
+  renderVideoTrack();
+  renderKeys();
+  for (const id of ['play', 'setIn', 'setOut', 'splitClip', 'addVideo', 'addAudio', 'tlZoomIn', 'tlZoomOut', 'tlFit', 'tlZoom']) $('#' + id).disabled = !st.mp4 || st.busy;
+  syncZoomSlider();
   updateTimelineTools();
-  const duration = ranges.reduce((sum, r) => sum + r.end - r.start, 0) + queuedDuration();
-  const segmentCount = ranges.length + st.sequenceClips.length;
-  $('#selInfo').textContent = st.mp4 ? `${segmentCount} segmento${segmentCount === 1 ? '' : 's'} · ${duration.toFixed(1)}s` : '—';
+  const count = st.parts.length;
+  $('#selInfo').textContent = st.mp4 ? `${count} clip${count === 1 ? '' : 's'} · ${timelineDuration().toFixed(1)}s` : '—';
 }
 
+let followPlayhead = true;
 function updateHead() {
   const editTime = currentTimelineTime();
-  $('#head').style.left = editPct(editTime);
-  $('#time').textContent = fmt(editTime);
   $('#tracksHead').style.left = editPct(editTime);
+  $('#time').textContent = fmt(editTime);
   const scrub = $('#scrubHandle');
   scrub.setAttribute('aria-valuemax', String(timelineDuration()));
   scrub.setAttribute('aria-valuenow', String(Math.round(editTime * 10) / 10));
   scrub.setAttribute('aria-valuetext', fmt(editTime));
-  $('#play').textContent = (activeSequenceIndex >= 0 ? sequenceVideo.paused : video.paused) ? '▶' : '❚❚';
+  $('#play').textContent = isPlaying() ? '❚❚' : '▶';
+  // A tocar, a vista acompanha o cursor quando ele sai do que se vê (como nos editores).
+  if (isPlaying() && followPlayhead && st.mp4) {
+    const x = (editTime / laneSpan()) * laneWidth() + TRACK_LABEL_W, left = tracksWrap.scrollLeft, w = tracksWrap.clientWidth;
+    if (x > left + w - 30 || x < left + TRACK_LABEL_W) tracksWrap.scrollLeft = x - TRACK_LABEL_W - (w - TRACK_LABEL_W) * 0.2;
+  }
 }
+
+// Clicar num clip seleciona-o e põe o cursor onde se clicou; arrastar o corpo muda-o de sítio
+// (o bloco segue o rato e uma linha mostra onde vai ficar); arrastar uma ponta corta/recupera.
+// Pointer capture no próprio bloco e, a meio do gesto, só layoutVideoTrack() (nunca re-render).
+$('#ranges').addEventListener('pointerdown', (e) => {
+  const block = e.target.closest('.range');
+  if (!block || e.button !== 0 || st.busy || !st.mp4) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const i = +block.dataset.index, edge = e.target.dataset.segEdge;
+  pausePlayback();
+  selectPart(i);
+  const before = beginVideoEdit(), initial = structuredClone(st.parts), offs0 = rangeOffsets();
+  const span0 = laneSpan(), lane = tl.getBoundingClientRect(), secPerPx = span0 / lane.width, x0 = e.clientX;
+  const playhead = currentTimelineTime();
+  let moved = false, dropAt = i;
+  const marker = $('#dropMarker');
+  try { block.setPointerCapture(e.pointerId); } catch {}
+  const move = (ev) => {
+    const dx = ev.clientX - x0;
+    if (!moved && Math.abs(dx) < 4) return;
+    moved = true;
+    const dt = dx * secPerPx;
+    if (edge) {
+      const p = st.parts[i], p0 = initial[i], o0 = offs0[i];
+      if (edge === 'in') {
+        // O início fica no mesmo sítio da régua; o que vem a seguir anda (encosta sempre).
+        p.start = clamp(p0.start + dt, 0, p0.end - 0.1);
+        showPart(i, p.start);
+      } else {
+        let end = clamp(p0.end + dt, p0.start + 0.1, partMax(p0));
+        // Íman no cursor (Alt desliga).
+        const editEnd = o0.editStart + (end - p0.start);
+        if (!ev.altKey && Math.abs(editEnd - playhead) < 8 * secPerPx) end = clamp(p0.start + (playhead - o0.editStart), p0.start + 0.1, partMax(p0));
+        p.end = end;
+        showPart(i, p.end - 0.03);
+      }
+      layoutVideoTrack(span0);
+    } else {
+      block.style.transform = `translateX(${dx}px)`;
+      block.classList.add('dragging');
+      const centre = offs0[i].editStart + (offs0[i].editEnd - offs0[i].editStart) / 2 + dt;
+      dropAt = offs0.filter((o, n) => n !== i && (o.editStart + o.editEnd) / 2 < centre).length;
+      const rest = offs0.filter((o, n) => n !== i);
+      let at = 0;
+      for (let n = 0; n < dropAt; n++) at += rest[n].editEnd - rest[n].editStart;
+      marker.hidden = false;
+      marker.style.left = `${(at / span0) * 100}%`;
+    }
+  };
+  const end = (ev) => {
+    block.removeEventListener('pointermove', move);
+    block.removeEventListener('pointerup', end);
+    block.removeEventListener('pointercancel', end);
+    if (block.hasPointerCapture(ev.pointerId)) block.releasePointerCapture(ev.pointerId);
+    marker.hidden = true;
+    block.style.transform = '';
+    block.classList.remove('dragging');
+    if (ev.type === 'pointercancel') { st.parts = initial; updateTimeline(); return; }
+    if (!moved) {
+      // Clique: cursor no sítio clicado dentro do clip.
+      const o = offs0[i];
+      seekTimelineTime(clamp((ev.clientX - lane.left) * secPerPx, o.editStart, Math.max(o.editStart, o.editEnd - 0.001)));
+      return;
+    }
+    if (!edge && dropAt !== i) {
+      const [part] = st.parts.splice(i, 1);
+      st.parts.splice(dropAt, 0, part);
+      partSel = dropAt;
+      st.activePart = dropAt;
+    }
+    updateTimeline();
+    if (!edge) seekTimelineTime(rangeOffsets()[partSel].editStart);
+    recordVideoEdit(before);
+  };
+  block.addEventListener('pointermove', move);
+  block.addEventListener('pointerup', end);
+  block.addEventListener('pointercancel', end);
+});
+$('#ranges').addEventListener('keydown', (e) => {
+  const block = e.target.closest('.range');
+  if (block && e.key === 'Enter') { e.preventDefault(); selectPart(+block.dataset.index, { seek: true }); }
+});
+// Clicar/arrastar no fundo da faixa de vídeo (fora dos clips) mexe só no cursor.
+tl.addEventListener('pointerdown', (e) => {
+  if (!st.mp4 || e.button !== 0 || e.target.closest('.range, .kf')) return;
+  startRulerDrag(e);
+});
 
 // Arrastar um ◆ muda o instante dessa posição (sem passar por cima das vizinhas); clique = ir para lá.
 function dragKey(e, k, el) {
   e.preventDefault();
   e.stopPropagation();
-  video.pause();
+  pausePlayback();
   const before = beginVideoEdit();
-  video.currentTime = k.t;
+  seekTimelineTime(sourceToEdit(k.t));
   try { el.setPointerCapture(e.pointerId); } catch {}
   const keys = st.crop.keys, i = keys.indexOf(k);
   const lo = i > 0 ? keys[i - 1].t + 0.1 : 0, hi = i < keys.length - 1 ? keys[i + 1].t - 0.1 : st.dur;
@@ -1009,10 +1032,11 @@ function dragKey(e, k, el) {
   const move = (ev) => {
     if (!moved && Math.abs(ev.clientX - x0) < 3) return;       // um clique não mexe no ◆
     moved = true;
-    k.t = clamp(editToSource(tAt(ev.clientX)), lo, hi);
+    const l = locate(tAt(ev.clientX));
+    if (!l || st.parts[l.i].mediaId) return;
+    k.t = clamp(l.src, lo, hi);
     el.style.left = pct(k.t);
-    video.currentTime = k.t;                                  // vês a moldura nesse instante
-    $('#time').textContent = fmt(k.t);
+    showPart(l.i, k.t);                                       // vês a moldura nesse instante
   };
   const up = () => {
     el.removeEventListener('pointermove', move);
@@ -1032,7 +1056,7 @@ function renderKeys() {
   if (st.layout !== 'crop') return;
   for (const k of st.crop.keys) {
     const d = document.createElement('div');
-    d.className = 'kf';
+    d.className = 'kf' + (k.path ? ' path' : '');
     d.style.left = pct(k.t);
     d.title = `Posição em ${fmt(k.t)} · arrasta para mudar o instante · botão direito apaga`;
     d.addEventListener('pointerdown', (e) => { if (e.button === 0) dragKey(e, k, d); else e.stopPropagation(); });
@@ -1051,67 +1075,29 @@ function renderKeys() {
   }
 }
 
-function dragHandle(which) {
-  return (e) => {
-    if (!st.mp4 || st.busy || e.button !== 0) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const before = beginVideoEdit();
-    try { e.target.setPointerCapture(e.pointerId); } catch {}
-    const move = (ev) => {
-      const t = editToSource(tAt(ev.clientX));
-      if (which === 'in') st.start = clamp(t, 0, st.end - 0.5);
-      else st.end = clamp(t, st.start + 0.5, st.dur);
-      video.currentTime = which === 'in' ? st.start : st.end;
-      updateTimeline();
-    };
-    const up = () => { e.target.removeEventListener('pointermove', move); e.target.removeEventListener('pointerup', up); e.target.removeEventListener('pointercancel', up); recordVideoEdit(before); };
-    e.target.addEventListener('pointermove', move);
-    e.target.addEventListener('pointerup', up);
-    e.target.addEventListener('pointercancel', up);
-  };
-}
-$('#hIn').addEventListener('pointerdown', dragHandle('in'));
-$('#hOut').addEventListener('pointerdown', dragHandle('out'));
-tl.addEventListener('pointerdown', (e) => {
-  if (!st.mp4) return;
-  try { tl.setPointerCapture(e.pointerId); } catch {}
-  const seek = (ev) => {
-    const sourceTime = editToSource(tAt(ev.clientX)), range = selectPartAt(sourceTime);
-    if (!range) return;
-    video.currentTime = sourceTime < range.start ? range.start : sourceTime > range.end ? range.end : sourceTime;
-    updateTimeline();
-  };
-  seek(e);
-  const up = () => { tl.removeEventListener('pointermove', seek); tl.removeEventListener('pointerup', up); };
-  tl.addEventListener('pointermove', seek);
-  tl.addEventListener('pointerup', up);
-});
-
-function seekToTime(time) {
-  if (activeSequenceIndex >= 0) activatePrimaryClip(time, false);
-  const previousPart = st.activePart;
-  video.currentTime = clamp(time, 0, st.dur);
-  selectPartAt(video.currentTime);
-  if (st.activePart !== previousPart) updateTimeline();
+function seekTimelineTime(time) {
+  if (time > editDuration() + 1e-3 && tailLength() > 0) {
+    pausePlayback();
+    enterTail(Math.min(time, timelineDuration()), false);
+    elementEditor?.update();
+    updateHead();
+    return;
+  }
+  tailTime = null; tailPlay = null;
+  const l = locate(time);
+  if (!l) return;
+  // A tocar e dentro do mesmo clip do vídeo principal, continua a tocar; senão pára.
+  if (!(isPlaying() && l.i === st.activePart && !st.parts[l.i].mediaId)) pausePlayback();
+  showPart(l.i, l.src);
   elementEditor?.update();
   updateHead();
-}
-function seekTimelineTime(time) {
-  if (time <= editDuration() || !st.sequenceClips.length) { seekToTime(editToSource(clamp(time, 0, editDuration()))); return; }
-  let offset = time - editDuration();
-  for (let i = 0; i < st.sequenceClips.length; i++) {
-    const length = sequenceClipLength(st.sequenceClips[i]);
-    if (offset <= length || i === st.sequenceClips.length - 1) { activateSequenceClip(i, clamp(offset, 0, length), false); return; }
-    offset -= length;
-  }
 }
 function seekOnRuler(clientX) { seekTimelineTime(tAt(clientX)); }
 function startRulerDrag(e) {
   if (!st.mp4 || st.busy || e.button !== 0) return;
   e.preventDefault();
   e.stopPropagation();
-  video.pause();
+  pausePlayback();
   const target = e.currentTarget;
   target.setPointerCapture(e.pointerId);
   seekOnRuler(e.clientX);
@@ -1132,213 +1118,159 @@ $('#scrubHandle').addEventListener('keydown', e => {
   if (!st.mp4 || st.busy || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
   e.preventDefault();
   e.stopImmediatePropagation();
-  video.pause();
+  pausePlayback();
   const step = e.shiftKey ? 1 : 1 / (st.mp4.fps || 30), current = currentTimelineTime();
   const next = e.key === 'Home' ? 0 : e.key === 'End' ? timelineDuration() : current + (e.key === 'ArrowLeft' ? -step : step);
   seekTimelineTime(clamp(next, 0, timelineDuration()));
 });
+// Zoom da timeline: botões, Ctrl+roda (à volta do rato). A roda sozinha desloca (Shift = para os lados).
+$('#tlZoomIn').addEventListener('click', () => zoomTimeline(1.5));
+$('#tlZoomOut').addEventListener('click', () => zoomTimeline(1 / 1.5));
+$('#tlFit').addEventListener('click', fitTimeline);
+// Roda do rato em qualquer sítio da timeline = zoom à volta do rato (a "pinça" do trackpad chega
+// como Ctrl+roda, também dá). Shift+roda = andar para os lados; Alt+roda = subir/descer nas faixas
+// (quando há muitas). O deslizar horizontal do trackpad desloca normalmente.
+tracksWrap.addEventListener('wheel', (e) => {
+  if (!st.mp4) return;
+  if (e.altKey) { e.preventDefault(); tracksWrap.scrollTop += e.deltaY; return; }
+  if (e.shiftKey) { e.preventDefault(); tracksWrap.scrollLeft += e.deltaY || e.deltaX; return; }
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+  e.preventDefault();
+  zoomTimeline(Math.exp(-clamp(e.deltaY, -120, 120) / 400), e.clientX);
+}, { passive: false });
+$('#tlZoom').addEventListener('input', (e) => {
+  const { lo, hi } = zoomRange(), target = lo * Math.pow(hi / lo, +e.target.value / 100);
+  zoomTimeline(target / (pxPerSec || fitPxPerSec()));
+});
+new ResizeObserver(() => { if (st.mp4) updateTimeline(); }).observe(tracksWrap);
 
+// Cortar o clip debaixo do cursor no cursor (I = tira o que está antes, O = o que está depois).
+function trimPartAtPlayhead(edge) {
+  const l = locate(currentTimelineTime());
+  if (!l) return;
+  const p = st.parts[l.i];
+  if (edge === 'in' ? l.src >= p.end - 0.1 : l.src <= p.start + 0.1) return;
+  const before = beginVideoEdit();
+  if (edge === 'in') p.start = l.src; else p.end = l.src;
+  updateTimeline();
+  showPart(l.i, edge === 'in' ? p.start : Math.max(p.start, p.end - 0.03));
+  recordVideoEdit(before);
+}
 $('#setIn').addEventListener('click', () => {
   if (!st.mp4 || st.busy) return;
-  if (activeSequenceIndex >= 0) {
-    const clip = st.sequenceClips[activeSequenceIndex], cut = sequenceVideo.currentTime;
-    if (!clip || cut >= (clip.trimEnd ?? clip.dur) - .05) return;
-    clip.trimStart = cut; updateTimeline(); saveSession(); return;
-  }
   if (audioItem()) {
-    const track = audioItem(), t = activeSourceToEdit(video.currentTime);
+    const track = audioItem(), t = currentTimelineTime();
     if (t < track.start || t >= audioEnd(track) - .05) return;
     const before = beginVideoEdit(); track.trimStart += t - track.start; track.start = t;
     renderAudioTracks(); renderTextOpts(); recordVideoEdit(before); return;
   }
   if (elementEditor?.selected()) { elementEditor.trimSelected('in'); return; }
-  const before = beginVideoEdit(); st.start = clamp(video.currentTime, 0, st.end - 0.5); updateTimeline(); recordVideoEdit(before);
+  trimPartAtPlayhead('in');
 });
 $('#setOut').addEventListener('click', () => {
   if (!st.mp4 || st.busy) return;
-  if (activeSequenceIndex >= 0) {
-    const clip = st.sequenceClips[activeSequenceIndex], cut = sequenceVideo.currentTime;
-    if (!clip || cut <= (clip.trimStart || 0) + .05) return;
-    clip.trimEnd = cut; updateTimeline(); saveSession(); return;
-  }
   if (audioItem()) {
-    const track = audioItem(), t = activeSourceToEdit(video.currentTime);
+    const track = audioItem(), t = currentTimelineTime();
     if (t <= track.start + .05 || t > audioEnd(track)) return;
     const before = beginVideoEdit(); track.trimEnd = track.trimStart + t - track.start;
     renderAudioTracks(); renderTextOpts(); recordVideoEdit(before); return;
   }
   if (elementEditor?.selected()) { elementEditor.trimSelected('out'); return; }
-  const before = beginVideoEdit(); st.end = clamp(video.currentTime, st.start + 0.5, st.dur); updateTimeline(); recordVideoEdit(before);
+  trimPartAtPlayhead('out');
 });
+// Dividir no cursor: o clip debaixo do cursor passa a dois, encostados.
 function splitPart() {
-  if (!st.mp4 || st.busy) return;
-  const ranges = getRanges(), r = ranges[st.activePart], t = video.currentTime;
-  if (!r || t <= r.start + 0.15 || t >= r.end - 0.15) {
-    setStatus('Coloca o cursor dentro do segmento, afastado das pontas, para o dividir.');
-    return;
+  if (!st.mp4 || st.busy) return false;
+  const l = locate(currentTimelineTime());
+  if (!l) return false;
+  const p = st.parts[l.i];
+  if (l.src <= p.start + 0.1 || l.src >= p.end - 0.1) {
+    setStatus('Coloca o cursor dentro de um clip, afastado das pontas, para o dividir.');
+    return false;
   }
   const before = beginVideoEdit();
-  st.parts = ranges.map(x => ({ ...x }));
-  st.parts.splice(st.activePart, 1, { start: r.start, end: t }, { start: t, end: r.end });
-  st.activePart++;
+  st.parts.splice(l.i, 1, { ...p, end: l.src }, { ...p, start: l.src });
+  partSel = l.i + 1;
+  st.activePart = l.i + 1;
   updateTimeline();
   recordVideoEdit(before);
+  return true;
 }
-function duplicatePart(index = st.activePart) {
+// Duplicar: uma cópia inteira do clip logo a seguir a ele (o resto anda para a frente).
+function duplicatePart(index = partSel >= 0 ? partSel : st.activePart) {
   if (!st.mp4 || st.busy) return;
-  const ranges = getRanges(), range = ranges[index];
-  if (!range) return;
+  const p = st.parts[index];
+  if (!p) return;
   const before = beginVideoEdit();
-  st.parts = ranges.map(part => ({ ...part }));
-  st.parts.splice(index + 1, 0, { ...range });
-  st.activePart = index + 1;
+  st.parts.splice(index + 1, 0, { ...p });
+  partSel = index + 1;
   updateTimeline();
+  seekTimelineTime(rangeOffsets()[index + 1].editStart);
   recordVideoEdit(before);
-  setStatus('Segmento duplicado a seguir ao original na exportação.');
+  setStatus(`${partName(p)} duplicado a seguir ao original.`);
 }
-function deletePart() {
-  if (!st.mp4 || st.busy) return;
-  const ranges = getRanges();
-  if (ranges.length < 2) return;
-  const before = beginVideoEdit();
-  st.parts = ranges.map(x => ({ ...x }));
-  st.parts.splice(st.activePart, 1);
-  st.activePart = Math.min(st.activePart, st.parts.length - 1);
-  if (!getRanges().some(r => video.currentTime >= r.start && video.currentTime < r.end)) video.currentTime = getRanges()[st.activePart].start;
+// Apagar: tira o clip e o resto encosta (sem buracos).
+function deletePart(index = partSel) {
+  if (!st.mp4 || st.busy || !st.parts[index]) return;
+  if (st.parts.length < 2) { setStatus('É o único clip da faixa — para o encurtar, puxa as pontas.'); return; }
+  const before = beginVideoEdit(), at = rangeOffsets()[index].editStart;
+  st.parts.splice(index, 1);
+  partSel = -1;
   updateTimeline();
-  recordVideoEdit(before);
-}
-function rippleDeletePart() {
-  if (!st.mp4 || st.busy) return;
-  const ranges = getRanges(), r = ranges[st.activePart];
-  if (ranges.length < 2 || !r) return;
-  if (rangeOccurrences(ranges, st.activePart).count > 1) return deletePart();
-  const before = beginVideoEdit();
-  st.parts = ranges.map(x => ({ ...x }));
-  st.parts.splice(st.activePart, 1);
-  st.rippleCuts = [...st.rippleCuts, { start: r.start, end: r.end }].sort((a, b) => a.start - b.start);
-  st.activePart = Math.min(st.activePart, st.parts.length - 1);
-  if (!getRanges().some(x => video.currentTime >= x.start && video.currentTime < x.end)) video.currentTime = getRanges()[st.activePart].start;
-  updateTimeline();
-  recordVideoEdit(before);
-}
-function restoreGap(start, end, atIndex) {
-  if (!st.mp4 || st.busy || end - start <= 0.05) return;
-  const ranges = getRanges();
-  if (ranges.some(r => Math.min(end, r.end) - Math.max(start, r.start) > 0.01)) return;
-  const before = beginVideoEdit();
-  st.rippleCuts = st.rippleCuts.filter(cut => Math.abs(cut.start - start) > 0.01 || Math.abs(cut.end - end) > 0.01);
-  // Insere no índice de onde veio (não reordena o array todo): um "repor trecho" nunca deve
-  // desfazer uma reordenação manual feita noutro sítio da timeline.
-  const parts = ranges.map(r => ({ ...r }));
-  const insertAt = clamp(atIndex ?? parts.length, 0, parts.length);
-  parts.splice(insertAt, 0, { start, end });
-  st.parts = parts;
-  st.activePart = insertAt;
-  video.pause();
-  video.currentTime = start + Math.min(0.05, (end - start) / 2);
-  updateTimeline();
+  seekTimelineTime(Math.min(at, Math.max(0, timelineDuration() - 0.01)));
   recordVideoEdit(before);
 }
 function restoreFullVideo() {
   if (!st.mp4 || st.busy) return;
   const before = beginVideoEdit();
-  st.start = 0;
-  st.end = st.dur;
-  st.parts = null;
-  st.activePart = 0;
-  st.rippleCuts = [];
-  video.pause();
-  video.currentTime = 0;
+  st.parts = [{ start: 0, end: st.dur }, ...st.parts.filter((p) => p.mediaId)];
+  partSel = -1;
+  pausePlayback();
   updateTimeline();
+  seekTimelineTime(0);
   recordVideoEdit(before);
 }
 function splitSelection() {
-  if (activeSequenceIndex >= 0) {
-    if (!splitSequenceClip()) setStatus('Coloca o cursor dentro do vídeo, afastado das pontas, para o dividir.');
-  } else if (audioItem()) {
+  if (audioItem()) {
     if (!splitAudio()) setStatus('Coloca o cursor dentro da música, afastado das pontas, para a dividir.');
   } else if (elementEditor?.selected()) {
     if (!elementEditor.splitSelected()) setStatus('Coloca o cursor dentro do elemento, afastado das pontas, para o dividir.');
   } else splitPart();
 }
 $('#splitClip').addEventListener('click', splitSelection);
+$('#removeSegment').addEventListener('click', () => {
+  if (audioItem()) removeAudio();
+  else if (elementEditor?.selected()) elementEditor.remove();
+  else deletePart();
+});
 const videoMenu = $('#videoContextMenu');
 let videoMenuTarget = null;
 function closeVideoMenu(restoreFocus = false) {
   videoMenu.hidden = true;
-  $('#removeSegment').setAttribute('aria-expanded', 'false');
   if (videoMenu.contains(document.activeElement)) document.activeElement.blur();
-  if (restoreFocus && videoMenuTarget) {
-    if (videoMenuTarget.kind === 'toolbar') $('#removeSegment').focus();
-    else {
-      const selector = videoMenuTarget.kind === 'gap' ? '.cutGap' : '.range.active';
-      tl.querySelector(selector)?.focus();
-    }
-  }
+  if (restoreFocus && videoMenuTarget) tl.querySelector('.range.active')?.focus();
   videoMenuTarget = null;
 }
-function showRemoveMenu(e) {
-  if (!st.mp4 || st.busy || elementEditor?.selected() || getRanges().length < 2) return;
-  e.preventDefault();
-  e.stopPropagation();
-  videoMenuTarget = { kind: 'toolbar' };
-  videoMenu.querySelector('[data-video-action="split"]').hidden = true;
-  videoMenu.querySelector('[data-video-action="duplicate"]').hidden = true;
-  videoMenu.querySelector('[data-video-action="openSegment"]').hidden = true;
-  videoMenu.querySelector('[data-video-action="delete"]').hidden = false;
-  videoMenu.querySelector('[data-video-action="rippleDelete"]').hidden = rangeOccurrences(getRanges(), st.activePart).count > 1;
-  videoMenu.querySelector('[data-video-action="restore"]').hidden = true;
-  videoMenu.querySelector('[data-video-action="restoreAll"]').hidden = true;
-  videoMenu.hidden = false;
-  const rect = $('#removeSegment').getBoundingClientRect();
-  videoMenu.style.left = `${clamp(rect.left, 8, innerWidth - videoMenu.offsetWidth - 8)}px`;
-  videoMenu.style.top = `${clamp(rect.bottom, 8, innerHeight - videoMenu.offsetHeight - 8)}px`;
-  $('#removeSegment').setAttribute('aria-expanded', 'true');
-  videoMenu.querySelector('button:not([hidden]):not(:disabled)')?.focus();
-}
-$('#removeSegment').addEventListener('click', e => {
-  if (activeSequenceIndex >= 0) removeSequenceClip();
-  else if (audioItem()) removeAudio();
-  else if (elementEditor?.selected()) elementEditor.remove();
-  else showRemoveMenu(e);
-});
 function showVideoMenu(e) {
-  const target = e.target.closest('.range, .cutGap');
+  const target = e.target.closest('.range');
   if (!target || !st.mp4 || st.busy) return;
   e.preventDefault();
   e.stopPropagation();
-  const rect = target.getBoundingClientRect();
-  if (target.classList.contains('cutGap')) {
-    videoMenuTarget = { kind: 'gap', start: +target.dataset.start, end: +target.dataset.end };
-  } else {
-    const index = [...document.querySelectorAll('#ranges .range')].indexOf(target);
-    const range = getRanges()[index];
-    if (!range) return;
-    if (activeSequenceIndex >= 0) activatePrimaryClip(range.start, false);
-    videoMenuTarget = { kind: 'segment', index };
-    st.activePart = index;
-    st.audioSel = null;
-    elementEditor?.select(null);
-    video.pause();
-    video.currentTime = clamp(e.clientX ? editToSource(tAt(e.clientX)) : range.start, range.start, range.end);
-    updateTimeline();
-  }
-  const gap = videoMenuTarget.kind === 'gap';
-  const range = !gap && getRanges()[videoMenuTarget.index];
+  const index = +target.dataset.index, o = rangeOffsets()[index];
+  if (!o) return;
+  pausePlayback();
+  selectPart(index);
+  if (e.clientX) seekTimelineTime(clamp(tAt(e.clientX), o.editStart, Math.max(o.editStart, o.editEnd - 0.001)));
+  videoMenuTarget = { index };
+  const t = currentTimelineTime();
   const splitAction = videoMenu.querySelector('[data-video-action="split"]');
-  splitAction.hidden = gap;
-  splitAction.disabled = gap || !range || video.currentTime <= range.start + .15 || video.currentTime >= range.end - .15;
-  splitAction.title = splitAction.disabled && !gap ? 'Clica mais longe das pontas para dividir' : '';
-  videoMenu.querySelector('[data-video-action="duplicate"]').hidden = gap;
-  videoMenu.querySelector('[data-video-action="openSegment"]').hidden = gap;
-  videoMenu.querySelector('[data-video-action="delete"]').hidden = gap || getRanges().length < 2;
-  videoMenu.querySelector('[data-video-action="rippleDelete"]').hidden = gap || getRanges().length < 2 || rangeOccurrences(getRanges(), videoMenuTarget.index).count > 1;
-  videoMenu.querySelector('[data-video-action="restore"]').hidden = !gap;
-  videoMenu.querySelector('[data-video-action="restoreAll"]').hidden = gap || !(st.parts?.length || st.start > .05 || st.end < st.dur - .05);
+  splitAction.disabled = t <= o.editStart + .1 || t >= o.editEnd - .1;
+  splitAction.title = splitAction.disabled ? 'Clica mais longe das pontas para dividir' : '';
+  videoMenu.querySelector('[data-video-action="delete"]').disabled = st.parts.length < 2;
+  videoMenu.querySelector('[data-video-action="openSegment"]').hidden = !!o.mediaId;
+  videoMenu.querySelector('[data-video-action="restoreAll"]').hidden = !(st.parts.length > 1 || st.parts[0]?.start > .05 || st.parts[0]?.end < st.dur - .05);
   videoMenu.hidden = false;
-  $('#removeSegment').setAttribute('aria-expanded', 'false');
-  const x = e.clientX || rect.left + rect.width / 2, y = e.clientY || rect.bottom;
+  const rect = target.getBoundingClientRect(), x = e.clientX || rect.left + rect.width / 2, y = e.clientY || rect.bottom;
   videoMenu.style.left = `${clamp(x, 8, innerWidth - videoMenu.offsetWidth - 8)}px`;
   videoMenu.style.top = `${clamp(y, 8, innerHeight - videoMenu.offsetHeight - 8)}px`;
   videoMenu.querySelector('button:not([hidden]):not(:disabled)')?.focus();
@@ -1354,13 +1286,10 @@ videoMenu.addEventListener('click', e => {
   closeVideoMenu();
   if (action === 'split') splitPart();
   else if (action === 'duplicate') duplicatePart(target.index);
-  else if (action === 'openSegment') openSegmentInNewTab(getRanges()[target.index]);
-  else if (action === 'delete') deletePart();
-  else if (action === 'rippleDelete') rippleDeletePart();
-  else if (action === 'restore') restoreGap(target.start, target.end);
+  else if (action === 'openSegment') openSegmentInNewTab(st.parts[target.index]);
+  else if (action === 'delete') deletePart(target.index);
   else if (action === 'restoreAll') restoreFullVideo();
-  if (target.kind === 'toolbar') $('#removeSegment').focus();
-  else tl.querySelector('.range.active')?.focus();
+  tl.querySelector('.range.active')?.focus();
 });
 videoMenu.addEventListener('keydown', e => {
   e.stopPropagation();
@@ -1375,102 +1304,47 @@ document.addEventListener('pointerdown', e => { if (!videoMenu.contains(e.target
 document.addEventListener('scroll', () => closeVideoMenu(), true);
 addEventListener('resize', () => closeVideoMenu());
 
-// Arrastar um segmento para outra posição troca a ordem de reprodução/exportação — a régua agora
-// posiciona-os por essa ordem (rangeOffsets()), por isso o segmento visivelmente muda de lugar.
-// Drag-and-drop nativo (não pointer capture): nunca se chama updateTimeline() a meio do arrasto,
-// só no drop — a meio destruiria o próprio nó que o gesto está a agarrar.
-let dragPartFrom = null;
-function partEls() { return [...document.querySelectorAll('#ranges .range:not(.sequenceRange)')]; }
-function clearPartDragMarks() { partEls().forEach(el => el.classList.remove('dragging', 'dragOverBefore', 'dragOverAfter')); }
-function reorderPart(from, targetIndex, before) {
-  if (!st.mp4 || st.busy || from === targetIndex) return;
-  const ranges = getRanges();
-  if (from < 0 || from >= ranges.length) return;
-  const videoBefore = beginVideoEdit();
-  const parts = ranges.map(r => ({ ...r }));
-  const [moved] = parts.splice(from, 1);
-  let to = targetIndex > from ? targetIndex - 1 : targetIndex;
-  if (!before) to++;
-  parts.splice(clamp(to, 0, parts.length), 0, moved);
-  st.parts = parts;
-  st.activePart = parts.indexOf(moved);
-  updateTimeline();
-  recordVideoEdit(videoBefore);
-}
-$('#ranges').addEventListener('dragstart', e => {
-  const target = e.target.closest('.range:not(.sequenceRange)');
-  if (!target || st.busy) { e.preventDefault(); return; }
-  dragPartFrom = partEls().indexOf(target);
-  e.dataTransfer.effectAllowed = 'move';
-  e.dataTransfer.setData('text/plain', String(dragPartFrom));   // o Firefox exige dados para o drag arrancar
-  target.classList.add('dragging');
-});
-$('#ranges').addEventListener('dragover', e => {
-  const target = e.target.closest('.range:not(.sequenceRange)');
-  if (!target || dragPartFrom == null) return;
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'move';
-  const r = target.getBoundingClientRect(), before = e.clientX < r.left + r.width / 2;
-  partEls().forEach(el => el.classList.remove('dragOverBefore', 'dragOverAfter'));
-  target.classList.add(before ? 'dragOverBefore' : 'dragOverAfter');
-});
-$('#ranges').addEventListener('drop', e => {
-  const target = e.target.closest('.range:not(.sequenceRange)');
-  if (target && dragPartFrom != null) {
-    e.preventDefault();
-    const r = target.getBoundingClientRect();
-    reorderPart(dragPartFrom, partEls().indexOf(target), e.clientX < r.left + r.width / 2);
-  }
-  dragPartFrom = null;
-  clearPartDragMarks();
-});
-$('#ranges').addEventListener('dragend', () => { dragPartFrom = null; clearPartDragMarks(); });
-
 $('#play').addEventListener('click', togglePlay);
 function togglePlay() {
   if (!st.mp4) return;
-  if (activeSequenceIndex >= 0) {
-    if (sequenceVideo.paused) sequenceVideo.play().catch(() => {}); else sequenceVideo.pause();
-    return;
-  }
-  if (video.paused) {
-    const r = selectPartAt(video.currentTime);
-    updateTimeline();
-    if (!r || video.currentTime < r.start || video.currentTime >= r.end - 0.05) video.currentTime = r?.start ?? st.start;
-    video.play();
-  } else video.pause();
+  if (isPlaying()) { pausePlayback(); return; }
+  // No fim do vídeo, o play recomeça do princípio.
+  if (currentTimelineTime() >= timelineDuration() - 0.05) seekTimelineTime(0);
+  if (tailTime != null) { enterTail(tailTime, true); return; }
+  const part = st.parts[st.activePart];
+  if (!part) return;
+  showPart(st.activePart, activeVideo().currentTime, true);
 }
 const LAYOUT_KEYS = ['streamer', 'crop', 'blur', 'original'];
 const seekBy = (dt) => {
-  const offs = rangeOffsets();
-  if (!offs.length) return;
-  const total = offs.at(-1).editEnd;
-  const target = clamp(activeSourceToEdit(video.currentTime) + dt, 0, total);
-  video.pause();
-  video.currentTime = editToSource(target);
-  selectPartAt(video.currentTime);
-  updateTimeline();
+  if (!st.mp4) return;
+  pausePlayback();
+  seekTimelineTime(clamp(currentTimelineTime() + dt, 0, timelineDuration()));
 };
 document.addEventListener('keydown', (e) => {
   if (e.target.closest('dialog, [role="menu"]')) return;
+  if (marking && e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); stopMarking('Seguimento cancelado.'); return; }
   if (st.busy) return;
   const t = e.target;
-  if (t.matches?.('input:not([type=range]), select, textarea')) return;
+  if (t.matches?.('input:not([type=range]), select, textarea') || t.isContentEditable) return;
   const k = e.key.toLowerCase();
   if ((e.ctrlKey || e.metaKey) && k === 'b') { e.preventDefault(); e.stopImmediatePropagation(); splitSelection(); return; }
-  if (e.shiftKey && k === 'delete' && !elementEditor?.selected() && !audioItem() && activeSequenceIndex < 0) { e.preventDefault(); e.stopImmediatePropagation(); rippleDeletePart(); return; }
-  if (!e.ctrlKey && !e.metaKey && !e.altKey && k === 'delete' && activeSequenceIndex >= 0) { e.preventDefault(); e.stopImmediatePropagation(); removeSequenceClip(); return; }
-  if (!e.ctrlKey && !e.metaKey && !e.altKey && k === 'delete' && audioItem()) { e.preventDefault(); e.stopImmediatePropagation(); removeAudio(); return; }
-  if (!e.ctrlKey && !e.metaKey && !e.altKey && k === 'delete' && !elementEditor?.selected()) { e.preventDefault(); e.stopImmediatePropagation(); deletePart(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === 'd' && partSel >= 0 && !elementEditor?.selected()) { e.preventDefault(); e.stopImmediatePropagation(); duplicatePart(); return; }
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && (k === 'delete' || k === 'backspace') && audioItem()) { e.preventDefault(); e.stopImmediatePropagation(); removeAudio(); return; }
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && (k === 'delete' || k === 'backspace') && !elementEditor?.selected() && partSel >= 0) { e.preventDefault(); e.stopImmediatePropagation(); deletePart(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (t.type === 'range' && k.startsWith('arrow')) return;          // as setas mexem no controlo
   if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
   else if (k === 'i') $('#setIn').click();
   else if (k === 'o') $('#setOut').click();
   else if (k === 'k') { e.preventDefault(); togglePlay(); }
+  else if (k === 'p' && !e.shiftKey && !e.repeat && st.mp4 && st.layout === 'crop' && !marking && !tracking) { e.preventDefault(); $('#addCropKey')?.click(); }
   else if (k === 'e') { e.preventDefault(); exportClip({ tiktok: e.shiftKey }); }   // sem isto o «E» ia parar à descrição
   else if (k === 'arrowleft' || k === 'arrowright') { e.preventDefault(); seekBy((k === 'arrowleft' ? -1 : 1) / (st.mp4?.fps || 30)); }
   else if (k === 'j' || k === 'l') seekBy(k === 'j' ? -1 : 1);
+  else if (k === 'escape') selectZone(null);
+  else if (k === '+' || k === '=') zoomTimeline(1.5);
+  else if (k === '-') zoomTimeline(1 / 1.5);
   else if (LAYOUT_KEYS[+k - 1]) setLayout(LAYOUT_KEYS[+k - 1]);
 });
 // Depois de clicar num botão/controlo, o teclado volta aos atalhos (o espaço não "clica" outra vez).
@@ -1504,22 +1378,24 @@ function renderOpts() {
     // As posições em si já se veem e mexem na barra de baixo (◆): arrasta para mudar o instante,
     // clique vai para lá, botão direito/duplo clique apaga. A lista aqui era a mesma informação
     // duas vezes — só ficam os botões que não têm equivalente na timeline.
-    o.innerHTML = `<div class="opt">
-      <h2>Posições da moldura</h2>
-      ${keys.length ? '<p class="muted small">Os ◆ na barra de baixo mostram as posições: arrasta para mudar o instante, clique vai para lá, botão direito ou duplo clique apaga.</p>'
-        : '<p class="muted small">Sem posições: a moldura fica ao centro.</p>'}
-      <button id="addCropKey" class="btn small" title="Cria uma posição nova no instante atual, para animar a moldura">◆ Posição aqui</button>
-      ${keys.length ? '<button id="clearKeys" class="btn small danger">Apagar posições</button>' : ''}
+    o.innerHTML = `<div class="opt cropOpt">
+      <h2>Moldura</h2>
+      <div class="cropActions">
+        <button id="addCropKey" class="btn small" aria-keyshortcuts="P" title="Posição aqui (P) — guarda a posição da moldura neste instante. Avança no vídeo e adiciona outra para animar." ${!st.mp4 || st.busy || marking || tracking ? 'disabled' : ''}>◆ Posição aqui <kbd>P</kbd></button>
+        ${keys.length ? '<button id="clearKeys" class="btn small danger" title="Apagar todas as posições da moldura" aria-label="Apagar todas as posições da moldura">✕</button>' : ''}
+      </div>
+      ${tracking ? '<button id="trackStop" class="btn small danger">■ Parar</button>' : `<button id="trackStart" class="btn small primary" title="Marca um alvo no vídeo original para a moldura o seguir até ao fim do clip." ${marking ? 'disabled' : ''}>🎯 ${marking ? 'Marca no original…' : 'Seguir alvo'}</button>${marking ? ' <button id="trackCancel" class="btn small">Cancelar</button>' : ''}`}
     </div>`;
+    o.querySelector('#trackStart')?.addEventListener('click', startMarking);
+    o.querySelector('#trackCancel')?.addEventListener('click', () => stopMarking());
+    o.querySelector('#trackStop')?.addEventListener('click', () => { trackAbort = true; });
     o.querySelector('#addCropKey').addEventListener('click', () => {
       const before = beginVideoEdit(), cur = cropAt(video.currentTime);
       addCropKeyAt(video.currentTime, { x: cur.x, y: cur.y, w: cur.w });
       recordVideoEdit(before);
     });
     o.querySelector('#clearKeys')?.addEventListener('click', () => { const before = beginVideoEdit(); keys.length = 0; renderOpts(); renderKeys(); recordVideoEdit(before); });
-    hint.textContent = keys.length > 1
-      ? 'No resultado: arrasta para enquadrar, roda do rato = zoom (ajusta a posição mais próxima). Para a moldura se mover mais, carrega em «◆ Posição aqui» noutro instante e ajusta.'
-      : 'No resultado: arrasta para enquadrar, roda do rato = zoom — fica fixo em todo o clip. Para a moldura se mover, carrega em «◆ Posição aqui» noutro instante e ajusta aí.';
+    hint.textContent = 'Seleciona a moldura para enquadrar · P adiciona posição.';
   } else if (st.layout === 'streamer') {
     renderStreamerOpts(o);
     hint.textContent = 'No resultado: arrasta a câmara ou a parte de baixo para enquadrar, roda do rato = zoom. No original também dá para mexer nas caixas.';
@@ -1647,21 +1523,75 @@ function setSplit(value) {
   placeRects(); updateSplitUi(); savePrefs(); rememberCam();
 }
 
+// ---------- resultado: vista (zoom/deslocar) e zona selecionada ----------
+// A roda do rato faz zoom da VISTA (para ver pormenores) e arrastar sem nada selecionado desloca-a.
+// Para mexer no enquadramento, clica-se primeiro numa zona (câmara/jogo/moldura…): aparece a
+// moldura dela com pegas; aí arrastar dentro dela enquadra e as pegas (ou a roda dentro dela) fazem
+// zoom do conteúdo. Esc ou clicar noutro sítio sem zona tira a seleção.
+const ZONE_LABELS = { cam: 'Câmara', game: 'Jogo', media: 'Imagem / vídeo', crop: 'Moldura 9:16', framing: 'Enquadramento' };
+function applyView() {
+  const W = resultBox.clientWidth, H = resultBox.clientHeight;
+  view.z = clamp(view.z, 1, 8);
+  view.x = clamp(view.x, W - W * view.z, 0);
+  view.y = clamp(view.y, H - H * view.z, 0);
+  resultView.style.transform = view.z > 1.001 ? `translate(${view.x}px, ${view.y}px) scale(${view.z})` : '';
+  resultBox.style.setProperty('--vz', view.z);
+  resultBox.classList.toggle('zoomed', view.z > 1.001);
+  $('#viewZoom').hidden = view.z <= 1.001;
+  $('#viewZoomV').textContent = Math.round(view.z * 100) + '%';
+}
+function zoomView(factor, clientX, clientY) {
+  const r = resultBox.getBoundingClientRect();
+  const px = (clientX ?? r.left + r.width / 2) - r.left, py = (clientY ?? r.top + r.height / 2) - r.top;
+  const z1 = clamp(view.z * factor, 1, 8), k = z1 / view.z;
+  view.x = px - (px - view.x) * k;
+  view.y = py - (py - view.y) * k;
+  view.z = z1;
+  applyView();
+}
+function resetView() { view.z = 1; view.x = view.y = 0; applyView(); }
+$('#viewZoomIn').addEventListener('click', () => zoomView(1.4));
+$('#viewZoomOut').addEventListener('click', () => zoomView(1 / 1.4));
+$('#viewZoomReset').addEventListener('click', resetView);
+new ResizeObserver(applyView).observe(resultBox);
+
+function zoneValid(id) {
+  if (!id || !st.mp4) return false;
+  if (id === 'crop') return st.layout === 'crop';
+  if (id === 'framing') return !!st.framing[st.layout];
+  if (st.layout !== 'streamer') return false;
+  if (id === 'cam') return true;
+  if (id === 'game') return st.streamer.bottom !== 'media';
+  return id === 'media' && mediaMode();
+}
+function selectZone(id) {
+  previewZone = zoneValid(id) ? id : null;
+  if (previewZone && elementEditor?.selected()) elementEditor.select(null);
+  updateSplitUi();
+}
+
 function updateSplitUi() {
   const visible = st.layout === 'streamer' && !!st.mp4 && !st.busy && !st.textSel;
-  const divider = $('#splitDivider'), frame = $('#splitBottomFrame');
+  const divider = $('#splitDivider'), frame = $('#zoneFrame');
   divider.hidden = !visible;
   divider.style.top = `${st.streamer.split * 100}%`;
   divider.setAttribute('aria-valuenow', Math.round(st.streamer.split * 100));
   $('#splitDividerValue').textContent = Math.round(st.streamer.split * 100) + '%';
-  frame.hidden = !visible || !['game', 'media'].includes(previewZone) || (st.streamer.bottom === 'media' && !mediaMode());
-  frame.style.top = `${st.streamer.split * 100}%`;
+  if (previewZone && !zoneValid(previewZone)) previewZone = null;
+  frame.hidden = !previewZone || st.busy || !!st.textSel;
+  if (frame.hidden) return;
+  const s = st.streamer.split;
+  const [top, height] = previewZone === 'cam' ? [0, s] : ['game', 'media'].includes(previewZone) ? [s, 1 - s] : [0, 1];
+  frame.style.top = `${top * 100}%`;
+  frame.style.height = `${height * 100}%`;
+  frame.dataset.zone = previewZone;
+  $('#zoneLabel').textContent = ZONE_LABELS[previewZone] + ' · arrasta para enquadrar';
 }
 
 $('#splitDivider').addEventListener('pointerdown', e => {
   if (e.button !== 0 || st.busy) return;
   const before = beginVideoEdit();
-  e.preventDefault(); video.pause(); previewZone = 'cam';
+  e.preventDefault(); pausePlayback();
   const target = e.currentTarget, initial = structuredClone(st.streamer), r = preview.getBoundingClientRect();
   const startY = e.clientY;
   target.setPointerCapture(e.pointerId);
@@ -1688,27 +1618,34 @@ $('#splitDivider').addEventListener('keydown', e => {
     recordVideoEdit(before);
   }
 });
-$('#splitBottomFrame').addEventListener('pointerdown', e => {
-  if (!e.target.dataset.corner || e.button !== 0 || st.busy) return;
-  const before = beginVideoEdit();
-  e.preventDefault(); video.pause();
-  const target = e.target, z = st.streamer.bottom === 'media' ? 'media' : 'game';
-  const box = $('#splitBottomFrame').getBoundingClientRect(), cx = box.left + box.width / 2, cy = box.top + box.height / 2;
-  const dx = e.clientX - cx, dy = e.clientY - cy, initial = structuredClone(st.streamer);
-  const aspect = z === 'game' ? regionById('game').aspect : null, r0 = z === 'game' ? { ...rectFor('game', video.currentTime) } : null;
+
+// Zoom do conteúdo da zona selecionada (factor > 1 = mais perto).
+function zoomZoneContent(id, factor, initial = null) {
+  if (id === 'framing') { const f = initial?.framing || st.framing[st.layout]; setFraming(f.scale * factor, f.ox, f.oy); return; }
+  if (id === 'media') { setMediaScale((initial?.scale ?? st.streamer.scale) * factor); return; }
+  const aspect = regionById(id).aspect, r0 = initial?.rect || rectFor(id, video.currentTime), h0 = rectH(r0, aspect);
+  const w = r0.w / factor, h = rectH({ w }, aspect);
+  setZoneRect(id, fitRect({ x: r0.x + (r0.w - w) / 2, y: r0.y + (h0 - h) / 2, w }, aspect));
+}
+// Pegas da moldura da zona: puxar para fora = mais zoom, para dentro = menos.
+$('#zoneFrame').addEventListener('pointerdown', e => {
+  if (!e.target.dataset.corner || e.button !== 0 || st.busy || !previewZone) return;
+  const before = beginVideoEdit(), z = previewZone;
+  e.preventDefault(); e.stopPropagation(); pausePlayback();
+  const target = e.target;
+  const box = $('#zoneFrame').getBoundingClientRect(), cx = box.left + box.width / 2, cy = box.top + box.height / 2;
+  const dx = e.clientX - cx, dy = e.clientY - cy;
+  const initial = { framing: z === 'framing' ? { ...st.framing[st.layout] } : null, scale: st.streamer.scale,
+    rect: ['cam', 'game', 'crop'].includes(z) ? { ...rectFor(z, video.currentTime) } : null, streamer: structuredClone(st.streamer) };
   target.setPointerCapture(e.pointerId);
   const move = ev => {
     const factor = clamp(((ev.clientX - cx) * dx + (ev.clientY - cy) * dy) / (dx * dx + dy * dy), .1, 10);
-    if (z === 'media') setMediaScale(initial.scale * factor);
-    else {
-      const w = r0.w / factor, h = rectH({ w }, aspect), h0 = rectH(r0, aspect);
-      setZoneRect('game', fitRect({ w, x: r0.x + (r0.w - w) / 2, y: r0.y + (h0 - h) / 2 }, aspect));
-    }
+    zoomZoneContent(z, factor, initial);
   };
   const end = ev => {
     target.removeEventListener('pointermove', move); target.removeEventListener('pointerup', end); target.removeEventListener('pointercancel', end);
     if (target.hasPointerCapture(e.pointerId)) target.releasePointerCapture(e.pointerId);
-    if (ev.type === 'pointercancel') { Object.assign(st.streamer, initial); renderOpts(); placeRects(); savePrefs(); rememberCam(); }
+    if (ev.type === 'pointercancel') restoreVideoEdit(before);
     else recordVideoEdit(before);
   };
   target.addEventListener('pointermove', move); target.addEventListener('pointerup', end); target.addEventListener('pointercancel', end);
@@ -1716,81 +1653,315 @@ $('#splitBottomFrame').addEventListener('pointerdown', e => {
 
 preview.addEventListener('pointermove', (e) => {
   if (e.buttons) return;
-  const z = zoneAt(e);
-  preview.classList.toggle('edit', !!z);
-  preview.title = z ? 'Arrasta para mover · roda do rato = zoom' : '';
+  const z = zoneAt(e), onSelected = z && z.id === previewZone;
+  preview.classList.toggle('edit', !!onSelected);
+  preview.classList.toggle('pan', !onSelected && view.z > 1.001);
+  preview.classList.toggle('pick', !onSelected && view.z <= 1.001 && !!z);
+  preview.title = onSelected ? 'Arrasta para enquadrar · roda = zoom da zona · Esc = largar'
+    : z ? 'Clica para editar esta zona · roda = zoom da vista' + (view.z > 1.001 ? ' · arrasta para andar' : '')
+    : 'Roda = zoom da vista';
 });
 
 preview.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0) return;
+  if (!st.mp4 || st.busy || (e.button !== 0 && e.button !== 1)) return;
   const z = zoneAt(e);
-  if (!z) return;
   document.activeElement?.blur();
-  const before = beginVideoEdit();
-  previewZone = z.id;
-  updateSplitUi();
   e.preventDefault();
   try { preview.setPointerCapture(e.pointerId); } catch {}
-  const x0 = e.clientX, y0 = e.clientY, s = st.streamer;
-  let move;
-  const framingInitial = z.id === 'framing' ? { ...st.framing[st.layout] } : null;
-  if (framingInitial) {
-    video.pause();
-    move = ev => setFraming(framingInitial.scale,
-      framingInitial.ox + (ev.clientX - x0) / z.r.width,
-      framingInitial.oy + (ev.clientY - y0) / z.r.height);
-  } else if (z.id === 'media') {
-    const ox0 = s.ox, oy0 = s.oy;
-    move = (ev) => {
-      s.ox = clamp(ox0 + (ev.clientX - x0) / z.r.width, -1.5, 1.5);
-      s.oy = clamp(oy0 + (ev.clientY - y0) / (z.r.height * z.h), -1.5, 1.5);
+  const x0 = e.clientX, y0 = e.clientY;
+  let move, up;
+  if (e.button === 0 && z && z.id === previewZone) {
+    // Zona selecionada: arrastar enquadra (como antes).
+    const before = beginVideoEdit(), s = st.streamer;
+    const framingInitial = z.id === 'framing' ? { ...st.framing[st.layout] } : null;
+    pausePlayback();
+    if (framingInitial) {
+      move = ev => setFraming(framingInitial.scale,
+        framingInitial.ox + (ev.clientX - x0) / z.r.width,
+        framingInitial.oy + (ev.clientY - y0) / z.r.height);
+    } else if (z.id === 'media') {
+      const ox0 = s.ox, oy0 = s.oy;
+      move = (ev) => {
+        s.ox = clamp(ox0 + (ev.clientX - x0) / z.r.width, -1.5, 1.5);
+        s.oy = clamp(oy0 + (ev.clientY - y0) / (z.r.height * z.h), -1.5, 1.5);
+      };
+    } else {
+      // Arrastar o conteúdo para a direita = a zona no original anda para a esquerda.
+      const aspect = regionById(z.id).aspect, r0 = { ...rectFor(z.id, video.currentTime) }, h0 = rectH(r0, aspect);
+      drag = { id: z.id, rect: r0 };
+      move = (ev) => {
+        const dx = (ev.clientX - x0) / z.r.width, dy = (ev.clientY - y0) / (z.r.height * z.h);
+        drag.rect = fitRect({ x: r0.x - dx * r0.w, y: r0.y - dy * h0, w: r0.w }, aspect);
+      };
+    }
+    up = (ev) => {
+      if (framingInitial) {
+        if (ev.type === 'pointercancel') setFraming(framingInitial.scale, framingInitial.ox, framingInitial.oy);
+        else recordVideoEdit(before);
+        return;
+      }
+      if (z.id === 'media') { savePrefs(); recordVideoEdit(before); return; }
+      const r = drag.rect;
+      drag = null;
+      setZoneRect(z.id, r);
+      recordVideoEdit(before);
     };
   } else {
-    // Arrastar o conteúdo para a direita = a zona no original anda para a esquerda.
-    const aspect = regionById(z.id).aspect, r0 = { ...rectFor(z.id, video.currentTime) }, h0 = rectH(r0, aspect);
-    drag = { id: z.id, rect: r0 };
+    // Sem zona selecionada (ou outra zona / botão do meio): arrastar desloca a vista com zoom;
+    // um clique simples seleciona a zona debaixo do rato.
+    const vx0 = view.x, vy0 = view.y;
+    let moved = false;
     move = (ev) => {
-      const dx = (ev.clientX - x0) / z.r.width, dy = (ev.clientY - y0) / (z.r.height * z.h);
-      drag.rect = fitRect({ x: r0.x - dx * r0.w, y: r0.y - dy * h0, w: r0.w }, aspect);
+      if (!moved && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return;
+      moved = true;
+      if (view.z > 1.001) { view.x = vx0 + ev.clientX - x0; view.y = vy0 + ev.clientY - y0; applyView(); preview.classList.add('panning'); }
+    };
+    up = () => {
+      preview.classList.remove('panning');
+      if (!moved && e.button === 0 && !e.scDeselected) selectZone(z?.id ?? null);
     };
   }
-  const up = (ev) => {
+  const finish = (ev) => {
     preview.removeEventListener('pointermove', move);
-    preview.removeEventListener('pointerup', up);
-    preview.removeEventListener('pointercancel', up);
-    if (framingInitial) {
-      if (ev.type === 'pointercancel') setFraming(framingInitial.scale, framingInitial.ox, framingInitial.oy);
-      else recordVideoEdit(before);
-      return;
-    }
-    if (z.id === 'media') { savePrefs(); recordVideoEdit(before); return; }
-    const r = drag.rect;
-    drag = null;
-    setZoneRect(z.id, r);
-    recordVideoEdit(before);
+    preview.removeEventListener('pointerup', finish);
+    preview.removeEventListener('pointercancel', finish);
+    up(ev);
   };
   preview.addEventListener('pointermove', move);
-  preview.addEventListener('pointerup', up);
-  preview.addEventListener('pointercancel', up);
+  preview.addEventListener('pointerup', finish);
+  preview.addEventListener('pointercancel', finish);
+});
+preview.addEventListener('dblclick', (e) => {
+  if (e.defaultPrevented || !st.mp4) return;
+  if (view.z > 1.001) resetView();
 });
 
 preview.addEventListener('wheel', (e) => {
-  const z = zoneAt(e);
-  if (!z || drag) return;
+  if (!st.mp4 || drag) return;
   e.preventDefault();
-  const before = beginVideoEdit();
-  const zoomIn = e.deltaY < 0;
-  if (z.id === 'framing') {
-    setFraming(st.framing[st.layout].scale * (zoomIn ? 1.06 : 1 / 1.06));
-    recordVideoEdit(before); return;
+  const z = zoneAt(e), zoomIn = e.deltaY < 0;
+  if (z && z.id === previewZone && !st.busy) {
+    // Dentro da zona selecionada: zoom do conteúdo.
+    const before = beginVideoEdit();
+    zoomZoneContent(z.id, zoomIn ? 1.06 : 1 / 1.06);
+    recordVideoEdit(before);
+    return;
   }
-  if (z.id === 'media') { setMediaScale(st.streamer.scale * (zoomIn ? 1.06 : 1 / 1.06)); recordVideoEdit(before); return; }
-  // Zoom à volta do centro da zona (zona mais pequena no original = mais zoom).
-  const aspect = regionById(z.id).aspect, r0 = rectFor(z.id, video.currentTime), h0 = rectH(r0, aspect);
-  const w = r0.w * (zoomIn ? 1 / 1.06 : 1.06), h = rectH({ w }, aspect);
-  setZoneRect(z.id, fitRect({ x: r0.x + (r0.w - w) / 2, y: r0.y + (h0 - h) / 2, w }, aspect));
-  recordVideoEdit(before);
+  zoomView(zoomIn ? 1.15 : 1 / 1.15, e.clientX, e.clientY);
 }, { passive: false });
+
+// ---------- editar texto diretamente no resultado ----------
+// Duplo clique num texto (ou Enter com ele selecionado, ou um texto novo): aparece uma caixa de
+// escrita por cima dele, com a mesma letra/tamanho/alinhamento. O texto continua a ser desenhado
+// pelo canvas (a caixa só mostra o cursor e a seleção), por isso vês logo o resultado final.
+let inlineText = null;
+function startInlineTextEdit(id, selectAll = false) {
+  const t = st.texts.find((x) => x.id === id);
+  if (!t || st.busy || !st.mp4) return;
+  finishInlineTextEdit();
+  pausePlayback();
+  if (!elementVisible(t, currentTimelineTime(), timelineDuration())) seekTimelineTime(t.in ?? 0);
+  if (st.textSel !== id) elementEditor.select(id);
+  elementEditor.commit();
+  const original = t.text;
+  const ta = document.createElement('textarea');
+  ta.className = 'inlineText';
+  ta.value = t.text;
+  ta.spellcheck = false;
+  ta.setAttribute('aria-label', 'Texto (Esc ou clicar fora para terminar)');
+  resultView.appendChild(ta);
+  const place = () => {
+    const W = preview.offsetWidth, H = preview.offsetHeight;            // sem o zoom da vista
+    const px = Math.max(4, t.size * W), lh = px * 1.2, pad = t.style === 'box' ? px * 0.28 : px * 0.12;
+    const maxW = W * 0.9 - pad * 2;
+    const bw = t._box ? t._box.w * W - pad * 2 : 0, bh = t._box ? t._box.h * H - pad * 2 : lh;
+    const cx = t.x * W, cy = t.y * H;
+    const left = t.align === 'left' ? cx - bw / 2 : t.align === 'right' ? cx + bw / 2 - maxW : cx - maxW / 2;
+    const top = cy - bh / 2;
+    Object.assign(ta.style, {
+      left: `${left}px`, top: `${top}px`, width: `${maxW}px`, height: `${Math.max(lh, bh)}px`,
+      font: (FONTS[t.font] || FONTS.moderna)[1](px), lineHeight: `${lh}px`, textAlign: t.align || 'center',
+      textTransform: t.uppercase ? 'uppercase' : 'none', caretColor: t.style === 'box' ? (isDark(t.color) ? '#fff' : '#000') : t.color,
+      transformOrigin: `${cx - left}px ${cy - top}px`, transform: `rotate(${t.rotation || 0}deg)`,
+    });
+  };
+  const finish = () => {
+    if (inlineText?.ta !== ta) return;
+    inlineText = null;
+    if (!t.text.trim()) t.text = original.trim() ? original : 'Texto';
+    ta.remove();
+    elementEditor.setEditingText(false);
+    elementEditor.commit();
+    elementPanel = '';
+    renderTextOpts();
+  };
+  ta.addEventListener('input', () => {
+    t.text = ta.value;
+    const side = $('#tText');
+    if (side && side.value !== ta.value) side.value = ta.value;
+    elementEditor.changed();
+    place();
+  });
+  ta.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); ta.blur(); }
+  });
+  ta.addEventListener('blur', finish);
+  ta.addEventListener('pointerdown', (e) => e.stopPropagation());
+  inlineText = { id, ta, place, finish };
+  elementEditor.setEditingText(true);
+  place();
+  ta.focus();
+  if (selectAll) ta.select(); else ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+function finishInlineTextEdit() { inlineText?.finish(); }
+
+// ---------- seguir alvo (formato Vertical) ----------
+// 1) «Seguir alvo» → desenha-se um quadrado no vídeo original (à esquerda); 2) os frames desde o
+// cursor até ao fim do clip são descodificados (WebCodecs) e o alvo é procurado em cada um
+// (tracker.js); 3) o caminho, suavizado, vira posições ◆ da moldura (path: true → curva contínua).
+// As posições ficam editáveis como as outras; se o alvo se perder, pára aí e diz onde.
+let marking = false, tracking = false, trackAbort = false;
+function startMarking() {
+  if (!st.mp4 || st.busy || st.layout !== 'crop') return;
+  pausePlayback();
+  const l = locate(currentTimelineTime());
+  if (!l || st.parts[l.i].mediaId || tailTime != null) { setStatus('Põe o cursor num clip do vídeo principal para seguir um alvo.'); return; }
+  marking = true;
+  overlay.classList.add('marking');
+  renderOpts();
+  setStatus('Desenha um quadrado à volta do que queres seguir, no vídeo original (à esquerda). Esc cancela.');
+}
+function stopMarking(message) {
+  marking = false;
+  overlay.classList.remove('marking');
+  overlay.querySelector('.trackBox')?.remove();
+  renderOpts();
+  if (message) setStatus(message);
+}
+overlay.addEventListener('pointerdown', (e) => {
+  if (!marking || e.button !== 0) return;
+  e.preventDefault(); e.stopPropagation();
+  const r = stage.getBoundingClientRect(), box = videoBox();
+  const inside = (cx, cy) => ({ x: clamp(cx - r.left, box.left, box.left + box.w), y: clamp(cy - r.top, box.top, box.top + box.h) });
+  const a = inside(e.clientX, e.clientY);
+  let b = a;
+  overlay.querySelector('.trackBox')?.remove();
+  const el = document.createElement('div');
+  el.className = 'trackBox';
+  overlay.appendChild(el);
+  try { overlay.setPointerCapture(e.pointerId); } catch {}
+  const draw = () => Object.assign(el.style, { left: `${Math.min(a.x, b.x)}px`, top: `${Math.min(a.y, b.y)}px`, width: `${Math.abs(b.x - a.x)}px`, height: `${Math.abs(b.y - a.y)}px` });
+  const move = (ev) => { b = inside(ev.clientX, ev.clientY); draw(); };
+  const up = () => {
+    overlay.removeEventListener('pointermove', move);
+    overlay.removeEventListener('pointerup', up);
+    overlay.removeEventListener('pointercancel', up);
+    const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
+    if (w < 10 || h < 10) { el.remove(); setStatus('Quadrado demasiado pequeno — arrasta para o desenhar à volta do alvo.'); return; }
+    const target = { x: (Math.min(a.x, b.x) - box.left) / box.w, y: (Math.min(a.y, b.y) - box.top) / box.h, w: w / box.w, h: h / box.h };
+    stopMarking();
+    runTracking(target);
+  };
+  overlay.addEventListener('pointermove', move);
+  overlay.addEventListener('pointerup', up);
+  overlay.addEventListener('pointercancel', up);
+});
+
+// Descodifica [start, end] da fonte principal e chama onFrame(frame, t) por ordem; 'stop' pára.
+// Cada frame é fechado logo a seguir (ver armadilha do flush por hardware no CLAUDE.md).
+async function decodeRange(start, end, onFrame) {
+  const { mp4, buf } = st, samples = mp4.samples, u8 = new Uint8Array(buf);
+  let stop = false, error = null;
+  const decoder = new VideoDecoder({
+    output: (frame) => {
+      const t = frame.timestamp / 1e6;
+      try { if (!stop && t >= start - 1e-3 && t <= end + 1e-3 && onFrame(frame, t) === 'stop') stop = true; }
+      catch (e) { error = e; stop = true; }
+      finally { frame.close(); }
+    },
+    error: (e) => { error = e; stop = true; },
+  });
+  decoder.configure({ codec: mp4.codec, codedWidth: mp4.width, codedHeight: mp4.height, description: mp4.description });
+  let i = 0;
+  for (let k = 0; k < samples.length && samples[k].pts <= start + 1e-3; k++) if (samples[k].key) i = k;
+  try {
+    for (let n = 0; i < samples.length && !stop && !trackAbort; i++, n++) {
+      const s = samples[i];
+      if (s.dts > end + 0.5) break;
+      while (decoder.decodeQueueSize > 6 && !stop && !trackAbort) await sleep(1);
+      decoder.decode(new EncodedVideoChunk({ type: s.key ? 'key' : 'delta', timestamp: Math.round(s.pts * 1e6), data: u8.subarray(s.offset, s.offset + s.size) }));
+      if (n % 20 === 19) await sleep(0);                                  // deixa a página respirar
+    }
+    if (!stop && !trackAbort) await withTimeout(decoder.flush(), 15000, 'O descodificador não terminou.').catch(() => {});
+  } finally { try { decoder.close(); } catch {} }
+  if (error) throw error;
+}
+
+async function runTracking(target) {
+  const l = locate(currentTimelineTime());
+  if (!l) return;
+  const part = st.parts[l.i], start = video.currentTime, end = part.end;
+  if (end - start < 0.3) { setStatus('Falta vídeo neste clip depois do cursor para seguir o alvo.'); return; }
+  const before = beginVideoEdit();
+  tracking = true; trackAbort = false; st.busy = true;
+  renderOpts();
+  setProgress(0);
+  const { w: W, h: H } = workSize(st.srcW, st.srcH, target.w * st.srcW, target.h * st.srcH);
+  const canvas = new OffscreenCanvas(W, H), ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const planes = new Float32Array(W * H * 3), pts = [];
+  let tracker = null, lastT = -1, lostSince = null, lostAt = null, lastUi = 0;
+  const onFrame = (frame, t) => {
+    if (t - lastT < 1 / 31) return;                                     // no máximo 30 frames por segundo
+    lastT = t;
+    ctx.drawImage(frame, 0, 0, W, H);
+    toPlanes(ctx.getImageData(0, 0, W, H).data, W, H, planes);
+    if (!tracker) {
+      tracker = createTracker(planes, W, H, { x: target.x * W, y: target.y * H, w: target.w * W, h: target.h * H });
+      const b = tracker.box();
+      pts.push({ t, x: (b.x + b.w / 2) / W, y: (b.y + b.h / 2) / H });
+      return;
+    }
+    const r = tracker.track(planes);
+    if (r.score < LOST_SCORE) {
+      lostSince ??= t;
+      if (t - lostSince > 0.6) { lostAt = lostSince; return 'stop'; }   // perdeu-se mesmo (não é só um frame mau)
+    } else {
+      lostSince = null;
+      pts.push({ t, x: r.cx / W, y: r.cy / H });
+    }
+    if (performance.now() - lastUi > 150) {
+      lastUi = performance.now();
+      const p = (t - start) / (end - start);
+      setProgress(p);
+      setStatus(`A seguir o alvo… ${Math.round(p * 100)}%`);
+    }
+  };
+  let failed = null;
+  try { await decodeRange(start, end, onFrame); } catch (e) { failed = e; }
+  tracking = false; st.busy = false;
+  setProgress(null);
+  if (pts.length < 2) {
+    renderOpts();
+    setStatus(failed ? 'Não consegui seguir o alvo: ' + failed.message : 'Não consegui seguir o alvo — tenta um quadrado mais justo à volta dele.');
+    return;
+  }
+  // Caminho suavizado (sem tremer) → posições ◆ de 0,4 em 0,4 s com o zoom atual da moldura.
+  if (DEV) globalThis.__trackPts = pts;
+  const cur = cropAt(start), h = rectH({ w: cur.w }, 9 / 16);
+  const keysPath = samplePath(smoothPath(pts, 0.3), 0.4);
+  const t0 = keysPath[0].t, t1 = keysPath.at(-1).t;
+  st.crop.keys = st.crop.keys.filter((k) => k.t < t0 - 0.05 || k.t > t1 + 0.05);
+  for (const p of keysPath) st.crop.keys.push({ t: p.t, ...fitRect({ x: p.x - cur.w / 2, y: p.y - h / 2, w: cur.w }, 9 / 16), path: true });
+  st.crop.keys.sort((a, b) => a.t - b.t);
+  renderOpts(); renderKeys(); placeRects();
+  recordVideoEdit(before);
+  seekTimelineTime(sourceToEdit(t0));
+  const upTo = fmt(sourceToEdit(t1));
+  setStatus(trackAbort ? `Seguimento parado em ${upTo}.`
+    : lostAt != null ? `Seguido até ${upTo} — aí o alvo perdeu-se. Põe o cursor aí e usa «Seguir alvo» outra vez para continuar.`
+    : `Alvo seguido até ao fim do clip (${keysPath.length} posições ◆). Podes afinar arrastando no resultado.`);
+}
 
 // --- câmara lembrada por canal (o mesmo streamer tem a câmara sempre no mesmo sítio) ---
 let chanKey = '_last';
@@ -1853,9 +2024,10 @@ function syncMediaTime(event) {
   for (const [key, p] of previewMedia) {
     const element = p.elementId && st.images.find(e => e.id === p.elementId && e.mediaId === p.mediaId);
     if ((p.elementId && !element) || !libItem(p.mediaId)) { disposePreviewMedia(p); previewMedia.delete(key); continue; }
-    const active = !st.busy && (element ? elementVisible(element, video.currentTime, st.dur) : mediaMode() && key === st.streamer.mediaId);
+    const now = currentTimelineTime(), playing = isPlaying();
+    const active = !st.busy && (element ? elementVisible(element, now, timelineDuration()) : mediaMode() && key === st.streamer.mediaId);
     if (!active) { p.el?.pause(); continue; }
-    const t = Math.max(0, video.currentTime - (element?.in ?? st.start));
+    const t = Math.max(0, now - (element?.in ?? 0));
     if (p.kind === 'frames') {
       if (p.reader && !p.pending && !p.error) {
         p.pending = p.reader.frameAt(t).then(f => { if (!p.disposed) p.img = f; })
@@ -1865,9 +2037,9 @@ function syncMediaTime(event) {
     }
     if (p.kind !== 'video' || !p.el.duration) continue;
     const target = t % p.el.duration;
-    const tolerance = video.paused || event?.type === 'seeked' ? .015 : .15;
+    const tolerance = !playing || event?.type === 'seeked' ? .015 : .15;
     if (!p.el.seeking && Math.abs(p.el.currentTime - target) > tolerance) p.el.currentTime = target;
-    if (video.paused) p.el.pause(); else if (p.el.paused) p.el.play().catch(() => {});
+    if (!playing) p.el.pause(); else if (p.el.paused) p.el.play().catch(() => {});
   }
 }
 video.addEventListener('seeked', syncMediaTime);
@@ -1876,6 +2048,9 @@ video.addEventListener('pause', syncMediaTime);
 video.addEventListener('seeked', () => syncAudioPreview(true));
 video.addEventListener('play', () => syncAudioPreview(true));
 video.addEventListener('pause', () => syncAudioPreview(true));
+sequenceVideo.addEventListener('seeked', syncMediaTime);
+sequenceVideo.addEventListener('play', syncMediaTime);
+sequenceVideo.addEventListener('pause', syncMediaTime);
 sequenceVideo.addEventListener('seeked', () => syncAudioPreview(true));
 sequenceVideo.addEventListener('play', () => syncAudioPreview(true));
 sequenceVideo.addEventListener('pause', () => syncAudioPreview(true));
@@ -1941,28 +2116,36 @@ async function queueVideoFiles(files) {
       if (!Number.isFinite(meta.dur) || meta.dur <= 0) throw new Error(`«${file.name}» não tem uma duração válida.`);
       const media = { id: 'm' + crypto.randomUUID(), name: file.name.replace(/\.[^.]+$/, ''), sourceName: file.name,
         type: 'video', blob: file, sourceBlob: file, dur: meta.dur, w: meta.w, h: meta.h, at: Date.now(), sequenceOnly: true };
-      const clip = { id: crypto.randomUUID(), mediaId: media.id, name: media.name, dur: media.dur, trimStart: 0, trimEnd: media.dur };
-      st.library.push(media); st.sequenceClips.push(clip); activeSequenceIndex = st.sequenceClips.length - 1;
+      // Entra como um clip normal no fim da faixa de vídeo (pode ser arrastado, cortado, duplicado).
+      const before = beginVideoEdit();
+      st.library.push(media);
+      st.parts.push({ mediaId: media.id, start: 0, end: media.dur });
+      partSel = st.parts.length - 1;
       updateTimeline();
+      recordVideoEdit(before);
       // O bloco aparece antes de copiar o Blob para IndexedDB. A persistência
       // continua em background e não atrasa a interação com a timeline.
       putMedia(media).then(() => saveSession()).catch(error => console.warn('guardar vídeo da sequência', error));
     }
     setStatus(`${files.length} vídeo${files.length === 1 ? '' : 's'} adicionado${files.length === 1 ? '' : 's'} imediatamente · o processamento fica para a exportação.`);
-    activateSequenceClip(st.sequenceClips.length - files.length, 0, false);
+    seekTimelineTime(rangeOffsets()[st.parts.length - files.length]?.editStart ?? 0);
     saveSession();
   } finally {
     importingMedia = false; setAppendSkeleton(false); updateTimeline();
   }
 }
 
-async function materializeVideoFiles(files, clipSpecs = null) {
-  if (!st.mp4 || !files.length || st.busy || importingMedia) return;
-  const oldDuration = st.dur, oldRanges = getRanges().map(range => ({ ...range })), oldState = videoSnapshot();
+// Antes de exportar: os clips de outros vídeos da faixa passam a fazer parte de UMA fonte (o vídeo
+// principal seguido de cada ficheiro usado, inteiro). Os clips continuam na mesma ordem e com os
+// mesmos cortes, agora como trechos dessa fonte — a timeline (e os elementos) não mudam.
+async function materializeVideoFiles() {
+  const mediaIds = [...new Set(st.parts.filter(p => p.mediaId).map(p => p.mediaId))];
+  if (!st.mp4 || !mediaIds.length || st.busy || importingMedia) return;
+  const files = mediaIds.map(id => libItem(id)?.sourceBlob || libItem(id)?.blob || null);
+  if (files.some(file => !file)) throw new Error('Falta um vídeo da faixa. Apaga esse clip e volta a adicioná-lo.');
+  const oldDuration = st.dur, oldState = videoSnapshot(), oldParts = structuredClone(st.parts);
   const oldElements = { texts: st.texts, images: st.images, audioTracks: st.audioTracks };
-  const queued = clipSpecs?.map(clip => ({ ...clip })) || null;
-  const queuedMediaIds = new Set(queued?.map(clip => clip.mediaId).filter(Boolean) || []);
-  importingMedia = true; st.busy = true; video.pause();
+  importingMedia = true; st.busy = true; pausePlayback();
   setAppendSkeleton(true, files.length === 1 ? 'A preparar vídeo…' : `A preparar ${files.length} vídeos…`);
   for (const el of document.querySelectorAll('header, .bottom, .optsWrap, #stage')) el.inert = true;
   updateTimeline();
@@ -1972,16 +2155,12 @@ async function materializeVideoFiles(files, clipSpecs = null) {
     ff = await getFFmpeg();
     const media = [];
     for (let i = 0; i < files.length; i++) {
-      const file = files[i], spec = queued?.[i], displayName = spec?.name || file.name || `vídeo ${i + 1}`;
+      const displayName = libItem(mediaIds[i])?.name || `vídeo ${i + 1}`;
       setStatus(`A preparar «${displayName}»…`);
       setAppendSkeleton(true, `A analisar ${displayName}…`);
-      const item = await inspectVideoFile(file, getFFmpeg);
+      const item = await inspectVideoFile(files[i], getFFmpeg);
       if (item.type !== 'video') throw new Error(`«${displayName}» não contém vídeo.`);
-      const sourceDuration = item.dur;
-      item.trimStart = clamp(spec?.trimStart || 0, 0, Math.max(0, sourceDuration - .05));
-      item.trimEnd = clamp(spec?.trimEnd ?? sourceDuration, item.trimStart + .05, sourceDuration);
-      item.fullClip = item.trimStart < .001 && Math.abs(item.trimEnd - sourceDuration) < .02;
-      item.dur = item.trimEnd - item.trimStart;
+      item.trimStart = 0; item.trimEnd = item.dur; item.fullClip = true;
       media.push(item);
     }
     setStatus(`A juntar ${media.length} vídeo${media.length === 1 ? '' : 's'} à faixa principal…`);
@@ -1994,14 +2173,13 @@ async function materializeVideoFiles(files, clipSpecs = null) {
       await ff.writeFile(name, new Uint8Array(media[i].buffer.slice(0)));
       inputNames.push(name);
     }
-
-    // Clips vindos da mesma fonte costumam já ter exatamente o mesmo formato.
-    // Nesse caso o ffmpeg limita-se a remuxar os pacotes: não descodifica nem
-    // recodifica o vídeo principal inteiro, o que torna a junção muito mais rápida.
-    const compatible = st.mp4.codec?.startsWith('avc1') && media.every(item => item.fullClip && item.copyReady && item.codec === st.mp4.codec &&
+    // Ficheiros vindos da mesma fonte costumam ter exatamente o mesmo formato: aí o ffmpeg só
+    // remuxa os pacotes (não descodifica nem recodifica), o que é muito mais rápido.
+    const compatible = st.mp4.codec?.startsWith('avc1') && media.every(item => item.copyReady && item.codec === st.mp4.codec &&
       item.w === st.srcW && item.h === st.srcH && Math.abs((item.fps || 0) - st.mp4.fps) < .1 &&
       item.hasAudio === st.mp4.hasAudio && (!item.hasAudio || item.audioCodec === 'aac'));
     let output = null;
+    const expected = oldDuration + media.reduce((sum, item) => sum + item.dur, 0);
     if (compatible) {
       setAppendSkeleton(true, 'A juntar sem recodificar…');
       const list = inputNames.map(name => `file '${name}'`).join('\n') + '\n';
@@ -2011,7 +2189,6 @@ async function materializeVideoFiles(files, clipSpecs = null) {
       if (code === 0) {
         const candidate = await ff.readFile('append-out.mp4');
         const buffer = candidate.buffer.slice(candidate.byteOffset, candidate.byteOffset + candidate.byteLength);
-        const expected = oldDuration + media.reduce((sum, item) => sum + item.dur, 0);
         try {
           const parsed = parseMp4(buffer);
           if (parsed.samples.length && Math.abs(parsed.duration - expected) <= Math.max(.5, expected * .02)) {
@@ -2038,51 +2215,42 @@ async function materializeVideoFiles(files, clipSpecs = null) {
       filters.push(`${concatInputs.join('')}concat=n=${sources.length}:v=1:a=1[vout][aout]`);
       args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-map', '[aout]', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20',
         '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', '-y', 'append-out.mp4');
-      const code = await withTimeout(ff.exec(args), 180000, 'A junção dos vídeos demorou demasiado.');
+      const code = await withTimeout(ff.exec(args), 600000, 'A junção dos vídeos demorou demasiado.');
       if (code !== 0) throw new Error('Não consegui juntar os vídeos.');
       output = await ff.readFile('append-out.mp4');
     }
     const joined = new Blob([output.buffer.slice(output.byteOffset, output.byteOffset + output.byteLength)], { type: 'video/mp4' });
 
-    // Só aqui (durante a exportação) a sequência virtual passa a ser uma fonte
-    // física. As edições existentes e os limites de cada clip são repostos depois.
     st.busy = false;
     for (const el of document.querySelectorAll('header, .bottom, .optsWrap, #stage')) el.inert = false;
     setAppendSkeleton(true, 'A atualizar a timeline…');
     await loadClip(joined, st.name, chanKey);
-    const newDuration = st.dur;
-    st.sequenceClips = [];
-    let boundary = oldDuration;
-    const appendedRanges = media.map((item, i) => {
-      const start = boundary;
-      boundary = i === media.length - 1 ? newDuration : Math.min(newDuration, boundary + item.dur);
-      return { start, end: boundary };
-    }).filter(range => range.end - range.start > .05);
-    Object.assign(st, {
-      start: oldState.start,
-      end: newDuration,
-      parts: [...oldRanges, ...appendedRanges],
-      activePart: oldRanges.length,
-      rippleCuts: oldState.rippleCuts,
-      framing: oldState.framing,
-    });
+    // Onde começa cada ficheiro na fonte nova.
+    const offset = new Map();
+    let cursor = oldDuration;
+    mediaIds.forEach((id, i) => { offset.set(id, cursor); cursor += media[i].dur; });
+    st.parts = cleanParts(oldParts.map(p => p.mediaId
+      ? { start: offset.get(p.mediaId) + p.start, end: Math.min(st.dur, offset.get(p.mediaId) + p.end) }
+      : { start: p.start, end: p.end }));
+    st.activePart = 0;
+    st.framing = oldState.framing;
     st.streamer = oldState.streamer;
     st.crop.keys = oldState.keys;
     st.texts = oldElements.texts;
     st.images = oldElements.images;
     st.audioTracks = oldElements.audioTracks;
     st.audioSel = null;
-    if (queuedMediaIds.size) {
-      st.library = st.library.filter(item => !queuedMediaIds.has(item.id));
-      await Promise.all([...queuedMediaIds].map(id => deleteMedia(id).catch(() => {})));
+    const unused = mediaIds.filter(id => libItem(id)?.sequenceOnly);
+    if (unused.length) {
+      st.library = st.library.filter(item => !unused.includes(item.id));
+      await Promise.all(unused.map(id => deleteMedia(id).catch(() => {})));
     }
     resetSequencePreview();
-    video.currentTime = Math.min(newDuration - .05, oldDuration + .05);
     normalizeElementTimes();
     setLayout(oldState.layout);
-    updateTimeline(); renderTextOpts(); elementEditor.reset(); resetEditHistory();
+    updateTimeline(); seekTimelineTime(0); renderTextOpts(); elementEditor.reset(); resetEditHistory();
     await saveSession();
-    setStatus(`${media.length} vídeo${media.length === 1 ? '' : 's'} anexado${media.length === 1 ? '' : 's'}${fastJoin ? ' · junção rápida' : ''} · timeline ${oldDuration.toFixed(1)}s → ${newDuration.toFixed(1)}s`);
+    setStatus(`${media.length} vídeo${media.length === 1 ? '' : 's'} juntado${media.length === 1 ? '' : 's'} à fonte${fastJoin ? ' · junção rápida' : ''}`);
   } finally {
     importingMedia = false; st.busy = false;
     setAppendSkeleton(false);
@@ -2203,7 +2371,7 @@ function wrapText(ctx, text, maxW) {
 
 function drawTexts(ctx, W, H, time, elementMedia) {
   for (const t of orderedElements(st)) {
-    if (!elementVisible(t, time, st.dur)) { t._box = null; continue; }
+    if (!elementVisible(t, time, timelineDuration())) { t._box = null; continue; }
     if (t.mediaId) {
       const m = elementMedia ? elementMedia.get(t.id) : previewMediaFor(t.mediaId, t);
       if (!m) { t._box = null; continue; }
@@ -2265,7 +2433,8 @@ function addText() {
   const t = { id: 'T' + ++textSeq, text: 'Texto', x: 0.5, y, ...d, rotation: 0, z: elementEditor?.nextZ() || 0, in: 0, out: null };
   st.texts.push(t);
   elementEditor?.commit();
-  selectText(t.id, true);
+  selectText(t.id, false);
+  startInlineTextEdit(t.id, true);        // escreve-se logo no vídeo, com o "Texto" selecionado
 }
 
 function selectText(id, focus) {
@@ -2297,7 +2466,7 @@ async function removeLibraryFile(id) {
   const m = libItem(id);
   if (!m) return;
   if (st.images.some(e => e.mediaId === id)) { setStatus('Remove primeiro do vídeo os elementos que usam este ficheiro.'); return; }
-  if (st.sequenceClips.some(clip => clip.mediaId === id)) { setStatus('Remove primeiro este clip da faixa principal.'); return; }
+  if (st.parts.some(part => part.mediaId === id)) { setStatus('Remove primeiro este clip da faixa de vídeo.'); return; }
   if (st.audioTracks.some(track => track.mediaId === id)) { setStatus('Remove primeiro da timeline as faixas que usam este áudio.'); return; }
   if (st.templates.some(t => t.images?.some(e => e.mediaId === id) || t.audioTracks?.some(track => track.mediaId === id) || t.streamer?.mediaId === id)) {
     setStatus('Remove primeiro este ficheiro dos templates que o usam.'); return;
@@ -2386,28 +2555,26 @@ function renderTextOpts() {
     </button><button class="elementDelete" data-tdel="${x.id}" title="Apagar ${name}" aria-label="Apagar ${name}">✕</button></div>`;
   }).join('');
   o.innerHTML = `<div class="opt">
-    <div class="hrow"><h2>Elementos</h2></div>
+    <div class="elementHeader"><h2>Elementos</h2><div class="seg elementAdd"><button id="addText" title="Adicionar texto (T)">+ Texto</button><button id="showImages" class="${elementPanel === 'image' ? 'on' : ''}">+ Ficheiro</button></div></div>
     ${chips ? `<div class="elementList">${chips}</div>` : ''}
-    <div class="seg"><button id="addText" title="Adicionar texto (T)">+ Texto <kbd>T</kbd></button><button id="showImages" class="${elementPanel === 'image' ? 'on' : ''}">+ Ficheiro</button></div>
     ${elementPanel === 'image' ? `<div id="elementPicker" class="elementPicker">${imagePickerHtml()}</div>` : ''}
     ${t ? `<textarea id="tText" aria-label="Texto do elemento" rows="2" placeholder="Escreve aqui…">${esc(t.text)}</textarea>` : ''}
     ${selected ? `<details id="elementOptions" class="elementOptions"${expandedElementOptions.has(selected.id) ? ' open' : ''}><summary>${t ? 'Estilo e posição' : 'Ajustes do ficheiro'}</summary><div class="opt">
-      ${t ? `<section class="textPresetGroup" aria-label="Presets de texto"><h3>Presets para clips</h3><div class="textPresetGrid">${presetButtons}</div></section>` : ''}
-      <label>Rotação <input id="elementAngle" type="number" min="-360" max="360" step="1" value="${selected.rotation || 0}"> °</label>` : ''}
+      ${t ? `<section class="textPresetGroup" aria-label="Presets de texto"><h3>Presets</h3><div class="textPresetGrid">${presetButtons}</div></section>` : ''}` : ''}
     ${selected?.mediaId ? `<label>Tamanho <input id="imageSize" type="range" min="0.03" max="2" step="0.01" value="${selected.size}"></label>` : ''}
     ${selected?.mediaId ? `<button id="replaceMedia" class="btn small"${importingMedia ? ' disabled' : ''}>${importingMedia ? 'A carregar…' : 'Substituir ficheiro'}</button><input id="replacementFile" type="file" accept="image/*,video/*,.mov,.mp4,.webm,.mkv,.avi,.gif" hidden>` : ''}
     ${t ? `
-    <div class="row swatches">${TEXT_COLORS.map((c) => `<button class="sw${c === t.color ? ' on' : ''}" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('')}
-      <label class="sw pick" title="Outra cor"><input id="tColor" type="color" value="${t.color}"></label></div>
-    <div class="seg s3">${[['outline', 'Contorno'], ['box', 'Caixa'], ['plain', 'Simples']].map(([v, n]) => `<button data-tstyle="${v}"${t.style === v ? ' class="on"' : ''}>${n}</button>`).join('')}</div>
+    <div class="row fontRow"><select id="tFont" title="Tipo de letra" aria-label="Tipo de letra">${Object.entries(FONTS).map(([k, [n]]) => `<option value="${k}"${t.font === k ? ' selected' : ''}>${n}</option>`).join('')}</select></div>
     <div class="row tools">
       <div class="seg s3 icons">${['left', 'center', 'right'].map((a) => `<button data-talign="${a}" title="Alinhar ${{ left: 'à esquerda', center: 'ao centro', right: 'à direita' }[a]}"${t.align === a ? ' class="on"' : ''}>${ALIGN_ICONS[a]}</button>`).join('')}</div>
-      <span class="sizeCombo"><input id="tSize" list="tSizeList" type="number" min="2" max="30" step="0.5" value="${Math.round(t.size * 1000) / 10}" title="Tamanho do texto" aria-label="Tamanho do texto"><datalist id="tSizeList">${TEXT_SIZE_PRESETS.map((v) => `<option value="${v}">`).join('')}</datalist></span>
+      <span class="sizeCombo"><span class="sizeLabel" aria-hidden="true">Tam.</span><input id="tSize" list="tSizeList" type="number" min="2" max="30" step="0.5" value="${Math.round(t.size * 1000) / 10}" title="Tamanho do texto" aria-label="Tamanho do texto"><datalist id="tSizeList">${TEXT_SIZE_PRESETS.map((v) => `<option value="${v}">`).join('')}</datalist></span>
       <button id="tUppercase" class="btn small uppercaseToggle${t.uppercase ? ' on' : ''}" aria-label="Maiúsculas" aria-pressed="${!!t.uppercase}" title="Alternar maiúsculas">Aa</button>
     </div>
-    <div class="row fontRow"><select id="tFont" title="Letra">${Object.entries(FONTS).map(([k, [n]]) => `<option value="${k}"${t.font === k ? ' selected' : ''}>${n}</option>`).join('')}</select></div>` : ''}
+    <div class="row swatches">${TEXT_COLORS.map((c) => `<button class="sw${c === t.color ? ' on' : ''}" data-color="${c}" style="background:${c}" title="${c}"></button>`).join('')}
+      <label class="sw pick" title="Outra cor"><input id="tColor" type="color" value="${t.color}"></label></div>
+    <div class="seg s3">${[['outline', 'Contorno'], ['box', 'Caixa'], ['plain', 'Simples']].map(([v, n]) => `<button data-tstyle="${v}"${t.style === v ? ' class="on"' : ''}>${n}</button>`).join('')}</div>` : ''}
     ${selected ? `<div class="row pos">
-      <button class="btn small" id="elementCenter" title="Centrar no visor">Centrar no visor</button>
+      <button class="btn small" id="elementCenter" title="Centrar no visor">Centrar</button>
       ${t ? `
       <button class="btn small" data-tpos="cx" title="Centrar na horizontal">↔</button>
       <button class="btn small" data-tpos="cy" title="Centrar na vertical">↕</button>
@@ -2415,6 +2582,7 @@ function renderTextOpts() {
       ${st.layout === 'streamer' ? '<button class="btn small" data-tpos="split" title="Na divisão câmara/jogo">Divisão</button>' : ''}
       <button class="btn small" data-tpos="bottom" title="Em baixo">Baixo</button>` : ''}
     </div>` : ''}
+    ${selected ? `<label class="rotationRow">Rotação <input id="elementAngle" type="number" min="-360" max="360" step="1" value="${selected.rotation || 0}" aria-label="Rotação em graus">°</label>` : ''}
     ${selected ? '</div></details>' : ''}
   </div>`;
 
@@ -2484,21 +2652,12 @@ function renderRecentClips() {
 $('#recentSel').addEventListener('change', async (event) => {
   const id = event.target.value;
   if (!id || st.busy) return;
-  await saveSession();
-  history.replaceState(null, '', `${location.pathname}?recent=${encodeURIComponent(id)}`);
-  event.target.disabled = true;
-  try {
-    const clip = await loadRecentClip(id);
-    if (!clip?.blob) throw new Error('Este clip já não está disponível.');
-    await touchRecentClip(id);
-    st.recentId = id;
-    await loadClip(clip.blob, clip.name, clip.channel, true);
-    st.recentClips = await listRecentClips();
-    renderRecentClips();
-  } catch (error) {
-    setStatus('Não consegui abrir o clip recente: ' + error.message);
-    event.target.value = '';
-  } finally { event.target.disabled = false; }
+  event.target.value = st.recentId || '';
+  if (id === st.recentId) return;
+  // Cada aba é um clip: um recente abre numa aba nova (ou nesta, se ainda estiver vazia).
+  if (!st.mp4) { location.search = `?recent=${encodeURIComponent(id)}`; return; }
+  const tab = window.open(`${extURL('editor.html')}?recent=${encodeURIComponent(id)}`, '_blank');
+  if (!tab) setStatus('O browser bloqueou a nova aba — permite pop-ups para abrir o clip recente.');
 });
 async function openSegmentInNewTab(range) {
   if (!range || !st.blob || st.busy) return;
@@ -2523,16 +2682,68 @@ async function openSegmentInNewTab(range) {
   }
 }
 
+// Elementos para templates/outro clip: já estão no tempo da régua (segundos do vídeo final).
+// out = null quando o elemento vai até ao fim (acompanha o fim de qualquer clip).
+function elementsInEditTime() {
+  const duration = editDuration();
+  // out = null só se acaba mesmo no fim dos clips (acompanha o fim de qualquer clip); um ficheiro
+  // que acaba antes ou depois guarda o seu fim (e portanto a sua duração).
+  const conv = ({ id, _box, ...e }) => ({ ...e, in: e.in ?? 0, out: e.out == null || Math.abs(e.out - duration) < 0.05 ? null : e.out });
+  return { duration, texts: st.texts.map(conv), images: st.images.map(conv), audioTracks: st.audioTracks.map(({ id, ...track }) => ({ ...track })) };
+}
+
+// Encaixa o tempo de um elemento de um template de duração T num vídeo de duração D (ambos em
+// segundos da régua). Antes deslocava tudo pela diferença das durações (ancorado ao fim): um
+// template de 30 s num clip de 15 s punha os textos em tempos negativos, que ficavam com 0,1 s —
+// apareciam na timeline (largura mínima do bloco) mas quase nunca no vídeo.
+function fitTemplateTime(e, T, D) {
+  const a = Math.max(0, e.in ?? 0), b = e.out ?? null;
+  // Ficheiros (imagem/vídeo) com duração escolhida mantêm-na sempre, mesmo que o clip novo seja mais
+  // curto: nunca se cortam nem encolhem — o vídeo final estica até eles acabarem.
+  if (e.mediaId && b != null && Math.abs(b - T) >= 0.05) return { in: a, out: b };
+  if (e.mediaId && b != null && a > 0.05) {
+    const length = b - a;                                                // acaba no fim: fica no fim, com a mesma duração
+    return length <= D ? { in: D - length, out: null } : { in: 0, out: length };
+  }
+  const toEnd = b == null || b >= T - 0.05;
+  if (a <= 0.05 && toEnd) return { in: 0, out: null };                  // cobria o vídeo todo: cobre o novo todo
+  // Só um bocado: fica com a MESMA duração. No mesmo sítio se couber; senão recua só o necessário
+  // para acabar no fim do clip (um texto dos últimos segundos continua nos últimos segundos).
+  const length = (toEnd ? T : b) - a;
+  if (length >= D - 0.05) return { in: 0, out: null };
+  if (a + length <= D) return { in: a, out: toEnd && Math.abs(a + length - D) < 0.05 ? null : a + length };
+  return { in: D - length, out: null };
+}
+
+// Põe os elementos (textos, imagens, música) de um template ou do clip anterior no vídeo atual.
+function placeElements(src, T) {
+  const D = st.dur ? editDuration() : 0;
+  const fit = (e) => {
+    if (!(T > 0) || !(D > 0)) return { ...e };
+    const r = fitTemplateTime(e, T, D);
+    return { ...e, in: r.in, out: r.out };
+  };
+  st.texts = (src.texts || []).map((x) => ({ ...fit(x), id: 'T' + ++textSeq }));
+  st.images = (src.images || []).map((x) => ({ ...fit(x), id: crypto.randomUUID() }));
+  st.audioTracks = (src.audioTracks || []).map((track) => ({
+    ...track, id: crypto.randomUUID(),
+    start: T > 0 && D > 0 && track.start >= D - 0.5 ? track.start * D / T : track.start,
+  }));
+  st.audioSel = null;
+  normalizeElementTimes();
+}
+
 function snapshot() {
   const s = st.streamer;
+  const el = elementsInEditTime();
   return {
-    v: 2, duration: st.dur, layout: st.layout,
+    v: 2, timeBase: 'edit', duration: el.duration, layout: st.layout,
     framing: structuredClone(st.framing),
     streamer: { split: s.split, bottom: s.bottom, mediaId: s.mediaId, scale: s.scale, ox: s.ox, oy: s.oy, cam: s.cam, game: s.game },
     crop: st.crop.keys.length ? cropAt(video.currentTime) : loadJSON('sc.crop', null),
-    texts: st.texts.map(({ id, _box, ...rest }) => rest),
-    images: cleanElements(st.images),
-    audioTracks: st.audioTracks.map(({ id, ...track }) => track),
+    texts: el.texts,
+    images: el.images,
+    audioTracks: el.audioTracks,
   };
 }
 
@@ -2558,16 +2769,9 @@ function applyTemplateSnap(t) {
   if (s.game) s.game = fitRect(s.game, OUT_V.w / (OUT_V.h - ch));
   st.crop.keys = [];
   if (t.crop) saveJSON('sc.crop', t.crop);
-  st.texts = (t.texts || []).map((x) => ({ ...x, id: 'T' + ++textSeq }));
-  st.images = (t.images || []).map(x => ({ ...x, id: crypto.randomUUID() }));
-  st.audioTracks = (t.audioTracks || []).map(track => ({ ...track, id: crypto.randomUUID() }));
-  st.audioSel = null;
-  pendingTemplateDuration = null;
-  if (Number.isFinite(t.duration) && t.duration > 0) {
-    if (st.dur > 0) offsetElementTimes(t.duration, st.dur);
-    else pendingTemplateDuration = t.duration;
-  }
-  normalizeElementTimes();
+  // Sem clip ainda (abrir o editor já com o último template): encaixa-se quando o clip chegar.
+  pendingTemplate = st.dur > 0 ? null : t;
+  placeElements(t, t.duration);
   st.textSel = null;
   savePrefs();
   rememberCam();
@@ -2713,13 +2917,13 @@ $('#templateList').addEventListener('click', e => {
 let sessionKey = '';
 function saveSession() {
   if (!sessionKey) return;
+  // v: 3 = faixa de vídeo como lista de clips e elementos no tempo da régua.
   const session = {
-    key: sessionKey, start: st.start, end: st.end, parts: st.parts, activePart: st.activePart, rippleCuts: st.rippleCuts, keys: st.crop.keys,
+    key: sessionKey, v: 3, parts: st.parts, activePart: st.activePart, keys: st.crop.keys,
     framing: st.framing,
     texts: st.texts.map(({ id, _box, ...rest }) => rest),
     images: cleanElements(st.images),
     audioTracks: st.audioTracks.map(({ id, ...track }) => track),
-    sequenceClips: structuredClone(st.sequenceClips),
     at: Date.now(),
   };
   saveJSON('sc.session', session);
@@ -2727,61 +2931,73 @@ function saveSession() {
 }
 setInterval(saveSession, 2000);
 addEventListener('pagehide', saveSession);
+// Ao limpar os guardados no menu da extensão, as abas abertas não voltam a gravar
+// automaticamente a sessão que acabou de ser apagada.
+addEventListener('storage', (event) => {
+  if (event.key === 'sc.session' && event.newValue === null) sessionKey = '';
+});
 async function restoreSession() {
   const ss = await loadEditorSession(sessionKey) || loadJSON('sc.session', null);
   if (!ss || ss.key !== sessionKey) return false;
   st.framing = normalizeFraming(ss.framing);
-  st.start = clamp(ss.start, 0, st.dur);
-  st.end = clamp(ss.end, st.start + 0.5, st.dur);
-  st.parts = Array.isArray(ss.parts) ? ss.parts.filter(r => Number.isFinite(r.start) && Number.isFinite(r.end) && r.end - r.start > 0.05)
-    .map(r => ({ start: clamp(r.start, st.start, st.end), end: clamp(r.end, st.start, st.end) }))
-    .filter(r => r.end - r.start > 0.05) : null;
-  if (!st.parts?.length) st.parts = null;
-  st.activePart = clamp(ss.activePart || 0, 0, Math.max(0, (st.parts?.length || 1) - 1));
-  st.rippleCuts = Array.isArray(ss.rippleCuts) ? ss.rippleCuts.filter(c => Number.isFinite(c.start) && Number.isFinite(c.end) && c.start >= 0 && c.end - c.start > 0.05 && c.end <= st.dur).map(c => ({ start: c.start, end: c.end })) : [];
+  let parts = Array.isArray(ss.parts) ? ss.parts : null;
+  if (ss.v !== 3) {
+    // Formato antigo: corte global [start, end], parts podia ser null e os «+ Vídeo» ficavam à parte.
+    const a = clamp(ss.start ?? 0, 0, st.dur), b = clamp(ss.end ?? st.dur, a, st.dur);
+    parts = (parts?.length ? parts : [{ start: a, end: b }]).map((r) => ({ start: clamp(r.start, a, b), end: clamp(r.end, a, b) }));
+    for (const clip of ss.sequenceClips || []) parts.push({ mediaId: clip.mediaId, start: clip.trimStart || 0, end: clip.trimEnd ?? clip.dur });
+  }
+  st.parts = cleanParts(parts);
+  st.activePart = clamp(ss.activePart || 0, 0, Math.max(0, st.parts.length - 1));
+  partSel = -1;
   st.crop.keys = (ss.keys || []).filter((k) => k.t <= st.dur);
-  if (ss.texts) { st.texts = ss.texts.map((x) => ({ ...x, id: 'T' + ++textSeq })); st.textSel = null; }
-  st.images = (ss.images || []).map(x => ({ ...x, id: crypto.randomUUID() }));
+  // No formato antigo os textos/imagens estavam em segundos da fonte: passam para a régua.
+  const toEdit = (e) => (ss.v === 3 ? e : { ...e, in: sourceToEdit(e.in ?? 0), out: e.out == null ? null : sourceToEdit(e.out) });
+  if (ss.texts) { st.texts = ss.texts.map((x) => ({ ...toEdit(x), id: 'T' + ++textSeq })); st.textSel = null; }
+  st.images = (ss.images || []).map(x => ({ ...toEdit(x), id: crypto.randomUUID() }));
   st.audioTracks = (ss.audioTracks || []).map(track => ({ ...track, id: crypto.randomUUID() }));
   st.audioSel = null;
-  st.sequenceClips = (ss.sequenceClips || []).filter(clip => clip?.mediaId && libItem(clip.mediaId));
-  activeSequenceIndex = -1;
   normalizeAudioTracks();
   return true;
 }
 
+// Clips válidos: dentro da duração da fonte (ou do ficheiro da biblioteca), nunca vazios.
+function cleanParts(parts) {
+  const out = (parts || []).filter((p) => p && Number.isFinite(p.start) && Number.isFinite(p.end) && (!p.mediaId || libItem(p.mediaId)))
+    .map((p) => {
+      const max = p.mediaId ? libItem(p.mediaId).dur : st.dur, start = clamp(p.start, 0, max);
+      return { ...(p.mediaId ? { mediaId: p.mediaId } : {}), start, end: clamp(p.end, start, max) };
+    })
+    .filter((p) => p.end - p.start > 0.05);
+  return out.length ? out : [{ start: 0, end: st.dur }];
+}
+
 function normalizeElementTimes() {
-  if (!st.dur) return;
+  const D = timelineDuration();
+  if (!D) return;
   for (const e of orderedElements(st)) {
     // Se o início ficou totalmente fora do novo clip (texto "mantido" ou template vindos de um
     // clip bem mais longo), o clamp simples abaixo encolhia-o para uma fração de segundo mesmo
     // no fim — "existe" no estado, mas impossível de ver a passar o vídeo normalmente. Nesse
     // caso extremo reancora-se ao início, preservando a duração pretendida em vez da posição.
-    if ((e.in ?? 0) >= st.dur) {
-      const length = e.out != null ? clamp(e.out - e.in, .1, st.dur) : st.dur;
+    if ((e.in ?? 0) >= D) {
+      const length = e.out != null ? clamp(e.out - e.in, .1, D) : D;
       e.in = 0;
-      if (e.out != null) e.out = clamp(length, .1, st.dur);
+      if (e.out != null) e.out = clamp(length, .1, D);
       continue;
     }
-    e.in = clamp(e.in ?? 0, 0, Math.max(0, st.dur - .1));
-    if (e.out != null) e.out = clamp(e.out, Math.min(st.dur, e.in + .1), st.dur);
+    e.in = clamp(e.in ?? 0, 0, Math.max(0, D - .1));
+    if (e.out != null) e.out = clamp(e.out, Math.min(D, e.in + .1), D);
   }
   normalizeAudioTracks();
-}
-
-function offsetElementTimes(fromDuration, toDuration) {
-  const offset = toDuration - fromDuration;
-  for (const e of orderedElements(st)) {
-    e.in = (e.in ?? 0) + offset;
-    if (e.out != null) e.out += offset;
-  }
-  normalizeElementTimes();
 }
 
 let clipLoadId = 0, clipURL = null;
 async function loadClip(blob, name, channel, fromStore = false, initialRange = null, branchId = '') {
   await saveSession();
   const loadId = ++clipLoadId;
+  // Os elementos que já estavam no editor (de outro clip) passam para o novo pela régua.
+  const carried = st.dur > 0 ? elementsInEditTime() : null;
   let url = null;
   try {
     resetSequencePreview();
@@ -2810,34 +3026,32 @@ async function loadClip(blob, name, channel, fromStore = false, initialRange = n
     clipURL = url;
     setCaption('');
     Object.assign(st, { blob, name: name || 'clip.mp4', buf, mp4, srcW: mp4.width, srcH: mp4.height, dur: mp4.duration });
-    st.start = 0;
-    st.end = mp4.duration;
-    st.parts = null;
+    st.parts = [{ start: 0, end: mp4.duration }];
     st.activePart = 0;
-    st.rippleCuts = [];
-    st.sequenceClips = [];
-    activeSequenceIndex = -1;
+    partSel = -1;
+    pxPerSec = 0;                                   // a timeline abre a mostrar o clip inteiro
     st.crop.keys = [];
     st.framing = normalizeFraming(st.templates.find(t => t.id === tplCur)?.framing);
     chanKey = channel || '_last';
     if (video.videoWidth) { st.srcW = video.videoWidth; st.srcH = video.videoHeight; }
     const known = restoreCam();                     // depois de saber o tamanho real do vídeo
     st.dur = Math.min(st.dur, video.duration || st.dur);
-    st.end = st.dur;
+    st.parts = [{ start: 0, end: st.dur }];
     if (initialRange && Number.isFinite(initialRange.start) && Number.isFinite(initialRange.end)) {
       const rangeStart = clamp(initialRange.start, 0, st.dur);
       const rangeEnd = clamp(initialRange.end, rangeStart + 0.05, st.dur);
-      if (rangeEnd - rangeStart > 0.05) { st.start = rangeStart; st.end = rangeEnd; }
+      if (rangeEnd - rangeStart > 0.05) st.parts = [{ start: rangeStart, end: rangeEnd }];
     }
     sessionKey = `${st.name}|${blob.size}${branchId ? `|branch:${branchId}` : ''}`;
     // Os clips virtuais da sessão referenciam a biblioteca persistida. Esperar por
     // ela evita perder a sequência quando o editor é recarregado muito depressa.
     await libraryReady;
     const resumed = await restoreSession();
-    if (pendingTemplateDuration != null) {
-      if (!resumed) offsetElementTimes(pendingTemplateDuration, st.dur);
-      pendingTemplateDuration = null;
+    if (!resumed) {
+      if (pendingTemplate) placeElements(pendingTemplate, pendingTemplate.duration);
+      else if (carried) placeElements(carried, carried.duration);
     }
+    pendingTemplate = null;
     normalizeElementTimes();
     // Guarda o clip (e o canal) para um refresh o voltar a abrir; tira o #pending do endereço.
     if (!fromStore) {
@@ -2859,6 +3073,7 @@ async function loadClip(blob, name, channel, fromStore = false, initialRange = n
     $('#export').disabled = $('#exportTT').disabled = false;
     setLayout(st.layout);
     updateTimeline();
+    seekTimelineTime(0);
     renderTextOpts();
     elementEditor?.reset();
     resetEditHistory();
@@ -2874,24 +3089,38 @@ async function loadClip(blob, name, channel, fromStore = false, initialRange = n
   }
 }
 
-$('#fileInput').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) loadClip(f, f.name); });
+// Cada aba é um clip: com um clip já aberto, abrir outro (ficheiro, arrastar, recentes) vai para
+// uma aba nova, em vez de misturar edições de clips diferentes na mesma aba.
+async function openClipFile(file) {
+  if (!file) return;
+  if (!st.mp4) return loadClip(file, file.name);
+  const tab = window.open('', '_blank');
+  if (!tab) { setStatus('O browser bloqueou a nova aba — permite pop-ups para abrir outro clip.'); return; }
+  try {
+    const recent = await saveRecentClip(file, file.name, '');
+    tab.location.replace(`${extURL('editor.html')}?recent=${encodeURIComponent(recent.id)}`);
+  } catch (error) { tab.close(); setStatus('Não consegui abrir o clip: ' + error.message); }
+}
+$('#fileInput').addEventListener('change', (e) => { openClipFile(e.target.files[0]); e.target.value = ''; });
 stage.addEventListener('dragover', (e) => { e.preventDefault(); stage.classList.add('dragover'); });
 stage.addEventListener('dragleave', () => stage.classList.remove('dragover'));
 stage.addEventListener('drop', (e) => {
   e.preventDefault();
   stage.classList.remove('dragover');
-  const f = e.dataTransfer.files[0];
-  if (f) loadClip(f, f.name);
+  openClipFile(e.dataTransfer.files[0]);
 });
 addEventListener('resize', placeRects);
 
 // O clip chega da aba da live (quem abriu o editor) por postMessage.
 // #pending = o editor abriu no clique e o clip ainda está a ser preparado.
 const editorParams = new URLSearchParams(location.search);
+const openBlank = editorParams.has('blank');
 const recentIdParam = editorParams.get('recent');
 const branchIdParam = editorParams.get('branch') || '';
 const initialRange = branchIdParam ? { start: Number(editorParams.get('start')), end: Number(editorParams.get('end')) } : null;
-const pending = location.hash === '#pending' || !!recentIdParam;
+// #pending=<id>: o id do clique (o mesmo que o processador usa ao guardar o clip no IndexedDB).
+const pendingId = location.hash.startsWith('#pending=') ? decodeURIComponent(location.hash.slice(9)) : '';
+const pending = location.hash.startsWith('#pending') || !!recentIdParam;
 const openedAt = Date.now();
 if (pending) {
   $('#drop').textContent = recentIdParam ? 'A abrir o clip recente…' : 'A preparar o clip…';
@@ -2900,13 +3129,32 @@ if (pending) {
 addEventListener('message', (ev) => {
   const m = ev.data;
   if (!m || (window.opener && ev.source !== window.opener)) return;
-  if (m.__scEd === 'clip') loadClip(m.blob, m.name, m.channel);
+  if (m.__scEd === 'clip') { clipArrived = true; loadClip(m.blob, m.name, m.channel); }
+  if (m.__scEd === 'progress' && !st.mp4 && !clipArrived && !clipFailed && m.text) {
+    lastHeardAt = Date.now();
+    $('#drop').textContent = 'A preparar o clip… · ' + m.text;
+    setStatus(m.text);
+  }
   if (m.__scEd === 'error' && !st.mp4) {
+    clipFailed = true;
     $('#drop').textContent = 'O clip falhou: ' + m.message;
     setStatus('Falhou: ' + m.message);
   }
 });
+let clipArrived = false, clipFailed = false;
 if (window.opener) window.opener.postMessage({ __scEd: 'ready' }, '*');
+// Sem notícias da aba da live há muito tempo: diz ao utilizador onde ver o que se passa.
+let lastHeardAt = Date.now();
+if (pending && !recentIdParam) {
+  const watchdog = setInterval(() => {
+    if (st.mp4 || clipArrived || clipFailed) { clearInterval(watchdog); return; }
+    const quiet = (Date.now() - lastHeardAt) / 1000;
+    if (quiet < 45) return;
+    $('#drop').textContent = window.opener
+      ? `Sem notícias da aba da live há ${Math.round(quiet)} s. Olha para o painel do Clipper nessa aba: se mostrar um erro, tira o clip outra vez. Se a aba foi fechada ou recarregada, o clip perdeu-se.`
+      : 'Esta aba não consegue falar com a aba da live (o site bloqueia). O clip abre aqui sozinho quando ficar pronto — ou vê em «Recentes».';
+  }, 5000);
+}
 // Plano B, se a mensagem da aba da live não chegar: o processador também guarda o clip no
 // IndexedDB. Com #pending espera-se por um clip mais recente do que esta aba; sem, abre o último.
 (async () => {
@@ -2923,13 +3171,20 @@ if (window.opener) window.opener.postMessage({ __scEd: 'ready' }, '*');
       return;
     }
   }
-  for (let i = 0; i < (pending ? 120 : 1); i++) {
+  // Com id, espera pelo clip desse clique (até 15 min: um clip na fila ou a recodificar pode
+  // demorar); sem id (versões antigas), aceita o último clip mais recente do que esta aba.
+  const tries = openBlank ? 0 : !pending ? 1 : pendingId ? 900 : 180;
+  for (let i = 0; i < tries; i++) {
     await new Promise((r) => setTimeout(r, pending ? 1000 : 300));
-    if (st.mp4 || srcParam) return;
+    if (st.mp4 || srcParam || clipArrived || clipFailed) return;
     try {
-      const c = await loadLastClip();
-      if (c?.blob && !st.mp4 && (!pending || c.at > openedAt - 1000)) return loadClip(c.blob, c.name, c.channel, true);
+      const c = pendingId ? await loadClipById(pendingId) : await loadLastClip();
+      if (c?.blob && !st.mp4 && !clipArrived && (!pending || pendingId || c.at > openedAt - 1000)) return loadClip(c.blob, c.name, c.channel, true);
     } catch {}
+  }
+  if (pending && !st.mp4 && !clipArrived && !clipFailed) {
+    $('#drop').textContent = 'O clip não chegou. Abre-o em «Recentes» ou tira outro clip.';
+    setStatus($('#drop').textContent);
   }
 })();
 const DEV = location.protocol !== 'chrome-extension:';
@@ -2950,7 +3205,10 @@ function setProgress(p) {
 }
 
 async function pickEncoder(w, h, fps) {
-  const base = { width: w, height: h, framerate: fps, bitrate: w * h > 1.5e6 ? 12_000_000 : 8_000_000, avc: { format: 'annexb' }, latencyMode: 'quality' };
+  // ≈0,2 bit/píxel: 1080×1920 a 30 fps ≈ 12 Mbps, a 60 fps ≈ 20 Mbps (antes 12 Mbps fixos, pouco
+  // para 60 fps — o TikTok ainda recomprime, por isso convém entregar-lhe boa qualidade).
+  const bitrate = Math.round(clamp(w * h * fps * 0.2, 8_000_000, 20_000_000));
+  const base = { width: w, height: h, framerate: fps, bitrate, avc: { format: 'annexb' }, latencyMode: 'quality' };
   for (const codec of ['avc1.64002a', 'avc1.640028', 'avc1.4d002a', 'avc1.42002a']) {
     for (const hardwareAcceleration of ['prefer-hardware', 'no-preference']) {
       const cfg = { ...base, codec, hardwareAcceleration };
@@ -3012,7 +3270,8 @@ async function encodeVideoFrames(onProgress, assets) {
   const ranges = getRanges();
   if (!ranges.length) throw new Error('Não há segmentos para exportar.');
   const frameCounts = ranges.map(r => Math.max(1, Math.round((r.end - r.start) * fps)));
-  const total = frameCounts.reduce((sum, count) => sum + count, 0);
+  const tailFrames = Math.round(tailLength() * fps);                     // depois do último clip (último frame parado)
+  const total = frameCounts.reduce((sum, count) => sum + count, 0) + tailFrames;
   const samples = mp4.samples;
 
   const out = [];
@@ -3047,14 +3306,15 @@ async function encodeVideoFrames(onProgress, assets) {
 
   let n = 0, decError = null;
   let lastOut = performance.now();          // última vez que algo avançou (para detetar encravanços)
-  const emit = async (frame, sourceTime) => {
+  const editDur = timelineDuration(), offs = rangeOffsets();
+  const emit = async (frame, sourceTime, editTime) => {
     checkAbort();
     const got = media && (await media(n / fps));
     const elementMedia = new Map();
     for (const element of st.images) {
-      if (elementVisible(element, sourceTime, st.dur)) elementMedia.set(element.id, await assets.get(element.id)(sourceTime));
+      if (elementVisible(element, editTime, editDur)) elementMedia.set(element.id, await assets.get(element.id)(editTime));
     }
-    renderFrame(ctx, frame, frame.displayWidth, frame.displayHeight, sourceTime, W, H, () => got, elementMedia);
+    renderFrame(ctx, frame, frame.displayWidth, frame.displayHeight, sourceTime, W, H, () => got, elementMedia, editTime);
     const vf = new VideoFrame(canvas, { timestamp: Math.round((n * 1e6) / fps), duration: Math.round(1e6 / fps) });
     encoder.encode(vf, { keyFrame: n % (fps * 2) === 0 });
     vf.close();
@@ -3084,7 +3344,7 @@ async function encodeVideoFrames(onProgress, assets) {
       const handle = async (frame) => {
         const ts = frame.timestamp / 1e6;
         while (prev && partN < partFrames && range.start + partN / fps < ts) {
-          await emit(prev, range.start + partN / fps);
+          await emit(prev, range.start + partN / fps, offs[part].editStart + partN / fps);
           partN++;
         }
         prev?.close();
@@ -3114,8 +3374,12 @@ async function encodeVideoFrames(onProgress, assets) {
       while (decoded.length) await handle(decoded.shift());
       if (prev) {
         while (partN < partFrames) {
-          await emit(prev, range.start + partN / fps);
+          await emit(prev, range.start + partN / fps, offs[part].editStart + partN / fps);
           partN++;
+        }
+        if (part === ranges.length - 1) {
+          const videoEnd = offs[part].editEnd;
+          for (let k = 0; k < tailFrames; k++) await emit(prev, range.end, videoEnd + k / fps);
         }
         prev.close();
       }
@@ -3425,19 +3689,10 @@ async function copyExportClip(onProgress) {
 async function exportClip({ tiktok = false } = {}) {
   if (st.busy || !st.mp4) return;
   if (importingMedia) { setStatus('Espera que os ficheiros acabem de carregar antes de exportar.'); return; }
-  if (st.sequenceClips.length) {
-    const clips = st.sequenceClips.map(clip => ({ ...clip }));
-    const files = clips.map(clip => {
-      const media = libItem(clip.mediaId);
-      return media?.sourceBlob || media?.blob || null;
-    });
-    if (files.some(file => !file)) {
-      setStatus('Falta um vídeo da sequência. Remove-o e volta a adicioná-lo antes de exportar.');
-      return;
-    }
+  if (st.parts.some(p => p.mediaId)) {
     try {
       setStatus('A preparar os vídeos adicionais para exportar…');
-      await materializeVideoFiles(files, clips);
+      await materializeVideoFiles();
     } catch (error) {
       console.error(error);
       setStatus('Não consegui preparar os vídeos adicionais: ' + (error.message || error));
@@ -3446,7 +3701,7 @@ async function exportClip({ tiktok = false } = {}) {
   }
   st.busy = true;
   for (const el of document.querySelectorAll('header, .bottom, .optsWrap, #stage')) el.inert = true;
-  video.pause();
+  pausePlayback();
   $('#export').disabled = $('#exportTT').disabled = true;
   $('#saveCopy').hidden = true;
   st.abort = false;
@@ -3508,7 +3763,7 @@ async function exportClip({ tiktok = false } = {}) {
         await ff.writeFile(fileName, new Uint8Array(await (media.sourceBlob || media.blob).arrayBuffer()));
         tempAudioFiles.push(fileName);
         args.push('-i', fileName);
-        const length = Math.max(.05, Math.min(audioLength(track), editDuration() - track.start));
+        const length = Math.max(.05, Math.min(audioLength(track), timelineDuration() - track.start));
         const chain = [`[${inputIndex}:a:0]atrim=start=${track.trimStart.toFixed(3)}:end=${(track.trimStart + length).toFixed(3)}`, 'asetpts=PTS-STARTPTS', `volume=${track.volume.toFixed(3)}`];
         if (track.fadeIn > 0) chain.push(`afade=t=in:st=0:d=${Math.min(track.fadeIn, length / 2).toFixed(3)}`);
         if (track.fadeOut > 0) {
@@ -3520,8 +3775,8 @@ async function exportClip({ tiktok = false } = {}) {
         mixLabels.push(`[music${i}]`);
         inputIndex++;
       }
-      if (mixLabels.length > 1) filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0:dropout_transition=0,alimiter=limit=.95,atrim=duration=${(v.frames / v.fps).toFixed(3)}[aout]`);
-      else if (mixLabels.length === 1) filters.push(`${mixLabels[0]}atrim=duration=${(v.frames / v.fps).toFixed(3)}[aout]`);
+      if (mixLabels.length > 1) filters.push(`${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=longest:normalize=0:dropout_transition=0,alimiter=limit=.95,apad,atrim=duration=${(v.frames / v.fps).toFixed(3)}[aout]`);
+      else if (mixLabels.length === 1) filters.push(`${mixLabels[0]}apad,atrim=duration=${(v.frames / v.fps).toFixed(3)}[aout]`);
       if (filters.length) args.push('-filter_complex', filters.join(';'));
       args.push('-map', '0:v:0');
       if (mixLabels.length) args.push('-map', '[aout]', '-c:a', 'aac', '-b:a', '160k');
@@ -3601,15 +3856,22 @@ async function save(blob, name) {
 // Para testes fora da extensão.
 elementEditor = createElementEditor({ st, video, preview,
   timelineDuration,
-  toTimelineTime: sourceToEdit,
-  fromTimelineTime: editToSource,
+  timelineScale: laneSpan,
+  now: currentTimelineTime,
+  seek: (t) => { pausePlayback(); seekTimelineTime(t); },
+  pause: pausePlayback,
+  onEditText: (e) => startInlineTextEdit(e.id),
   onCommit: () => recordEdit({ kind: 'element' }),
   onUndo: editHistory,
   canUndo: () => editUndo.length > 0,
   canRedo: () => editRedo.length > 0,
   renderPanel: () => { elementPanel = ''; renderTextOpts(); },
   onSelection: () => {
-    if (elementEditor?.selected() && st.audioSel) { st.audioSel = null; renderAudioTracks(); }
+    if (elementEditor?.selected()) {
+      if (st.audioSel) { st.audioSel = null; renderAudioTracks(); }
+      if (partSel >= 0) selectPart(-1);
+      if (previewZone) selectZone(null);
+    }
     updateTimelineTools();
   },
   save: () => {
@@ -3619,7 +3881,30 @@ elementEditor = createElementEditor({ st, video, preview,
   },
   addText, mediaItem: libItem, fmt,
 });
-if (DEV) globalThis.__editor = { st, exportClip, setLayout, updateCropKey, addCropKeyAt, addToLibrary, queueVideoFiles, materializeVideoFiles, addAudioTracks, libItem, previewMedia, addText, selectText, selectAudio, snapshot, applyTemplateSnap, elementEditor, renderFrame, encodeVideo, saveSession, updateTimeline, sourceToEdit, editToSource, editDuration, timelineDuration, askTikTok, finishTikTok };
+if (DEV) globalThis.__editor = { st, runTracking, exportClip, setLayout, updateCropKey, addCropKeyAt, addToLibrary, queueVideoFiles, materializeVideoFiles, addAudioTracks, libItem, previewMedia, addText, selectText, selectAudio, snapshot, applyTemplateSnap, elementEditor, renderFrame, encodeVideo, saveSession, updateTimeline, sourceToEdit, locate, currentTimelineTime, seekTimelineTime, splitPart, duplicatePart, deletePart, zoomTimeline, editDuration, timelineDuration, askTikTok, finishTikTok };
+
+chrome.storage?.onChanged?.addListener(async (changes, area) => {
+  if (area !== 'local' || (!changes.templatesChangedAt && !changes.savedChangedAt && !changes.libraryChangedAt)) return;
+  try {
+    if (changes.templatesChangedAt) {
+      tplCur = '';
+      st.templates = await listTemplates();
+      renderTemplates();
+    }
+    if (changes.savedChangedAt) {
+      sessionKey = '';
+      st.recentClips = await listRecentClips();
+      renderRecentClips();
+    }
+    if (changes.libraryChangedAt) {
+      st.library = await listMedia();
+      renderOpts();
+      renderTextOpts();
+      updateTimeline();
+      syncAudioPreview(true);
+    }
+  } catch (error) { console.warn('atualização dos guardados', error); }
+});
 
 // Abre no último formato usado (a primeira vez: Streamer).
 let lastLayout = null;

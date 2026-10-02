@@ -1,14 +1,9 @@
-// Alterna a captura a partir do ícone da extensão.
+// O botão da barra abre o menu; o estado de captura continua visível no badge.
 function updateAction(enabled) {
-  chrome.action.setTitle({ title: enabled ? 'Desativar Stream Clipper' : 'Ativar Stream Clipper' });
+  chrome.action.setTitle({ title: enabled ? 'Stream Clipper — ligado' : 'Stream Clipper — desligado' });
   chrome.action.setBadgeText({ text: enabled ? 'ON' : '' });
   chrome.action.setBadgeBackgroundColor({ color: '#16803c' });
 }
-
-chrome.action.onClicked.addListener(async () => {
-  const { enabled } = await chrome.storage.local.get('enabled');
-  await chrome.storage.local.set({ enabled: enabled !== true });
-});
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.enabled) updateAction(changes.enabled.newValue === true);

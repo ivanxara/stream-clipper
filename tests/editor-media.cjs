@@ -40,7 +40,7 @@ const { pathToFileURL } = require('node:url');
     await page.setInputFiles('#fileInput',path.resolve(process.argv[2]));
     await page.waitForFunction(() => window.__editor?.st.mp4 && document.querySelector('#src').readyState >= 2);
     await page.evaluate(() => __editor.setLayout('original'));
-    await page.click('#addElement'); await page.getByRole('button',{name:'Ficheiro',exact:true}).click();
+    await page.click('#showImages');
     assert.match(await page.locator('#imageFiles').getAttribute('accept'), /video\/\*/);
     await page.setInputFiles('#imageFiles', [
       {name:'motion.gif',mimeType:'',buffer:gif},
@@ -78,7 +78,7 @@ const { pathToFileURL } = require('node:url');
         const pixel = ctx.getImageData(1,0,1,1).data; return green ? pixel[1] > 200 : pixel[0] > 200;
       },{id:gifId,green});
     }
-    await page.click('#addElement'); await page.click('#showImages');
+    await page.click('#showImages');
     await page.click(`[data-image-id="${items[1].id}"]`);
     await page.waitForFunction(() => __editor.st.images[1]?._box);
     await page.evaluate(() => {
@@ -103,7 +103,7 @@ const { pathToFileURL } = require('node:url');
     // Observe frames sent to the real H.264 encoder, including a cut and a loop.
     const encoded = await page.evaluate(async () => {
       const Native = window.VideoEncoder, samples = [], canvas = new OffscreenCanvas(320,180), ctx = canvas.getContext('2d');
-      const {st} = __editor; st.start=0; st.end=1.25; st.parts=[{start:0,end:.5},{start:.75,end:1.25}];
+      const {st} = __editor; st.parts=[{start:0,end:.5},{start:.75,end:1.25}];
       st.images[0].size=.4; st.images[1].size=.3; st.images[2].size=.2;
       window.VideoEncoder = class {
         constructor(init) {this.encoder=new Native(init);} static isConfigSupported(c) {return Native.isConfigSupported(c);}
@@ -117,7 +117,8 @@ const { pathToFileURL } = require('node:url');
     assert(encoded.bytes>100);
     let checked=0;
     for (const sample of encoded.samples) {
-      const source = sample.t < .5 ? sample.t : sample.t + .25;
+      // Os elementos vivem no tempo da timeline (vídeo final), por isso o corte não os desloca.
+      const source = sample.t;
       if (source>.11 && source<1.09) {
         const phase=(source-.1)%.5;
         if (Math.abs(phase-.2)>.02) {assert(sample.gif[phase<.2?0:1]>220,'GIF remains animated after cuts'); checked++;}
@@ -128,7 +129,7 @@ const { pathToFileURL } = require('node:url');
       }
     }
     assert(checked>10);
-    await page.click('#addElement'); await page.click('#showImages');
+    await page.click('#showImages');
     assert.equal(await page.locator('#videoFraming p, #elementPicker p').count(),0, 'panels have no explanatory paragraphs');
     const count = await page.evaluate(() => __editor.st.images.length);
     await page.click(`[data-delete-media="${items[0].id}"]`);

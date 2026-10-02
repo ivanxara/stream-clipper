@@ -7,9 +7,11 @@ INSTALAR
 4. Clica "Carregar descompactada" / "Load unpacked" e escolhe esta pasta.
 
 USAR
-- A extensão começa desligada. Clica no ícone Stream Clipper na barra do browser para a ligar;
-  o painel aparece nas páginas YouTube, Twitch ou Kick. Clica outra vez no ícone para desligar
-  e esconder o painel. O estado fica guardado entre sessões.
+- A extensão começa desligada. Clica no ícone Stream Clipper na barra do browser para abrir o menu;
+  usa o interruptor para ligar ou desligar. O painel aparece nas páginas YouTube, Twitch ou Kick
+  quando estiver ligado. O estado fica guardado entre sessões. No menu também podes abrir o editor
+  sem vídeo, limpar os templates, os clips recentes e sessões, ou a biblioteca. Limpar a biblioteca
+  remove ficheiros usados por templates, por isso esses elementos deixam de aparecer.
 - Abre uma live no YouTube, Twitch ou Kick. Com a extensão ligada, aparece um painel "Clipper"
   no canto inferior direito.
 - Ponto VERDE = modo live (YouTube, Twitch e Kick): o clip é descarregado diretamente da live, a
@@ -41,23 +43,21 @@ EDITOR PARA TIKTOK
 - O botão ✎ no painel volta a abrir o último clip no editor.
 - Ecrã do editor (cabe tudo sem scroll): à esquerda o clip original, ao centro o RESULTADO 9:16 em
   grande, à direita as opções e o botão Exportar. Os formatos estão nas abas lá em cima.
-- Edita-se diretamente no resultado: arrasta para enquadrar e usa a roda do rato para zoom (na
-  câmara, no jogo, na moldura Vertical ou na imagem/vídeo). No original também dá para mexer nas caixas.
+- Edita-se diretamente no resultado: clica numa zona (câmara, jogo, moldura Vertical ou
+  imagem/vídeo) e arrasta dentro dela para enquadrar; os cantos (ou a roda dentro dela) fazem zoom.
+  Sem zona selecionada, a roda faz zoom da vista. No original também dá para mexer nas caixas.
 - Tudo o que ajustas fica guardado logo e vale para as próximas vezes (mesmo depois de fechar o
   browser): formato, altura da câmara, jogo/imagem, imagem escolhida e o tamanho/posição dela,
   câmara de cada canal e a última moldura Vertical.
-- Atalhos: Espaço / K play-pausa · I / O início/fim do elemento selecionado (ou do vídeo sem seleção) · Ctrl+B divide o elemento selecionado (ou o vídeo sem seleção) · Delete apaga o elemento/segmento selecionado · Shift+Delete apaga o segmento e fecha o espaço
-  selecionado · ← → um frame · J / L ±1s · 1-4 formato · E exportar ·
-  T novo texto · Delete apaga o elemento selecionado · Esc tira a seleção · Ctrl+D duplica ·
+- Atalhos: Espaço / K play-pausa · I / O cortam o elemento selecionado (ou o clip debaixo do cursor) · Ctrl+B divide o elemento selecionado (ou o clip no cursor) · Delete apaga o elemento/clip selecionado · + / − zoom da timeline
+  · ← → um frame · J / L ±1s · 1-4 formato · E exportar ·
+  T novo texto · Enter edita o texto selecionado · Esc tira a seleção · Ctrl+D duplica ·
   Ctrl+Z desfaz a última edição do vídeo ou dos elementos · Ctrl+Shift+Z refaz. Com um elemento selecionado, as setas
   movem-no no visor (Shift = passos maiores); sem seleção, ← → avançam/recuam um frame.
-- Na timeline, «Remover» aparece depois de dividires o vídeo; escolhe se queres manter o espaço vazio ou deslocar o conteúdo seguinte. Com um elemento, áudio ou vídeo adicional selecionado, o botão passa a uma ação «Apagar» direta, sem seta. Estas remoções podem ser desfeitas com Ctrl+Z; o marcador ↶ também repõe o trecho. Seleciona o trecho a retirar
-  e usa o menu «Remover», Delete, Shift+Delete ou o botão direito. As pontas brancas ajustam o início e o fim por arrasto.
-  No botão direito de um segmento, «Duplicar segmento» insere uma cópia a seguir ao original na exportação; as cópias aparecem empilhadas e podem ser selecionadas/removidas separadamente.
+- Na timeline, o botão «Apagar» aparece quando há um clip, elemento ou áudio selecionado.
   Para percorrer o vídeo, arrasta o marcador amarelo ou arrasta em qualquer ponto da régua de tempo.
-  Para recuperar um trecho apagado, clica na zona riscada e escolhe «Repor trecho»; também está
-  disponível pelo botão direito. O menu do vídeo tem «Repor vídeo completo» para recuperar todos
-  os trechos e os cortes de início/fim. Podes desfazer estas reposições com Ctrl+Z.
+  O botão direito num clip tem «Repor o vídeo completo» para voltar ao clip original inteiro.
+  Tudo pode ser desfeito com Ctrl+Z.
 - ELEMENTOS: «+ Adicionar elemento» mostra Texto e Ficheiro. «Ficheiro» abre os ficheiros guardados,
   com os mais recentes primeiro; «Carregar ficheiro» aceita imagens, GIFs e vídeos (MOV, MP4,
   M4V, MKV e WebM). Clica numa miniatura para adicionar o ficheiro por cima do vídeo.
@@ -84,8 +84,8 @@ EDITOR PARA TIKTOK
   Elementos e Exportação.
 - VÍDEO E MÚSICA: os botões «+ Vídeo» e «+ Música» junto às ferramentas de corte evitam passar
   pela biblioteca. «+ Vídeo» anexa um ou vários clips ao fim da faixa principal, com o respetivo
-  som, e aumenta imediatamente a duração da timeline. O novo segmento pode logo ser cortado,
-  dividido ou removido. Para sobrepor um vídeo ao principal, usa
+  som, como clips normais da faixa: podem ir para qualquer sítio, ser cortados, divididos,
+  duplicados ou apagados. Para sobrepor um vídeo ao principal, usa
   «+ Ficheiro» em Elementos. «+ Música» cria uma faixa verde
   por baixo do vídeo. Arrasta o bloco para posicionar a música e as pegas das pontas para escolher
   o trecho; seleciona-o para ajustar volume (0–200%), entrada/saída suave, silenciar ou apagar.
@@ -99,7 +99,7 @@ EDITOR PARA TIKTOK
   formatos diferentes usam automaticamente a conversão segura nessa altura e podem demorar mais.
 - TEXTOS (qualquer formato): «+ Texto» em Elementos (ou T) põe um texto no resultado já pronto a escrever.
   No resultado: arrasta para mover (encaixa no centro, nos terços e na divisão câmara/jogo; Alt
-  desliga o encaixe), roda do rato = tamanho, duplo clique = editar. Só a caixa de texto fica
+  desliga o encaixe), roda do rato sobre o texto selecionado = tamanho, duplo clique = escrever no vídeo. Só a caixa de texto fica
   sempre visível; carrega em «Estilo e posição» para abrir cor, estilo (Contorno / Caixa /
   Simples), tamanho, alinhamento, letra e os botões rápidos de posição (Centrar no visor, ↔
   centrar, ↕ centrar, Cima, Divisão, Baixo). O tamanho do texto escreve-se ou escolhe-se numa
@@ -114,19 +114,41 @@ EDITOR PARA TIKTOK
   original.
 - TEMPLATES (barra de cima): «Guardar novo» abre um diálogo para criar um template com TUDO o que está montado (formato, câmara/jogo, altura,
   imagem/vídeo e o tamanho/posição, moldura Vertical, textos, imagens livres e faixas de áudio com os respetivos ajustes).
-  Escolhe-o na lista para aplicar; os tempos dos elementos mantêm a distância ao fim do clip, adaptando-se à duração
-  do novo vídeo;
+  Escolhe-o na lista para aplicar. Os tempos adaptam-se à duração do novo vídeo: o que cobria o
+  vídeo todo continua a cobri-lo; o que estava nos últimos segundos passa para os últimos segundos;
+  um texto que só durava um bocado fica com a mesma duração (no mesmo sítio, ou encostado ao fim
+  se o clip for mais curto);
   o último escolhido é aplicado sozinho quando abres o editor. «Atualizar» guarda diretamente
   as alterações no template selecionado, mantendo o nome. «Guardar novo» cria outro template
   e pede um nome diferente; nunca substitui um existente. O seletor adapta a largura ao nome.
   «Gerir» abre a lista: podes aplicar, editar o nome e carregar em Renomear, duplicar ou
   apagar cada template. Apagar pede confirmação na própria linha.
-- Barra de tempo: arrasta as pegas brancas para cortar início e fim. Clica numa faixa para selecionar
-  o segmento; Ctrl+B divide-o no cursor e Delete remove-o. A exportação junta os segmentos restantes,
-  sem intervalos vazios, e mantém o áudio sincronizado. Depois de dividir (ou duplicar) em vários
-  segmentos, arrasta qualquer um deles para outra posição na barra para mudar a ordem em que o
-  clip fica montado — o vídeo passa mesmo a começar (ou continuar) por esse troço, tanto a ver no
-  editor como na exportação.
+- RESULTADO: a roda do rato faz zoom da vista (para ver pormenores) e, com zoom, arrastar anda
+  para os lados; duplo clique volta a ver tudo. Para mudar o enquadramento, clica primeiro numa
+  zona (câmara, jogo, moldura): aparece a moldura dela — arrasta dentro para enquadrar e usa os
+  cantos (ou a roda dentro dela) para o zoom. Esc larga a zona.
+- SEGUIR ALVO (formato Vertical): em «Seguir alvo», carrega em «🎯 Seguir alvo», põe o cursor onde
+  queres começar e desenha no vídeo original (à esquerda) um quadrado à volta do que queres seguir
+  — uma cabeça, uma pessoa, um objeto. A moldura 9:16 passa a segui-lo sozinha até ao fim do clip
+  (aparecem ◆ amarelos pequenos na faixa de vídeo). Se o alvo se perder (tapado, virou-se, corte de
+  cena), pára aí e diz onde: põe o cursor nesse ponto e marca outra vez. As posições criadas
+  afinam-se como as outras (arrastar no resultado, apagar ◆). «■ Parar» interrompe; Ctrl+Z desfaz
+  tudo de uma vez. Dica: um quadrado justo à volta do alvo, com um bocadinho de fundo, funciona melhor.
+- TEXTO NO VÍDEO: «+ Texto» abre logo uma caixa de escrita por cima do vídeo; duplo clique num
+  texto (ou Enter com ele selecionado) volta a editá-lo ali. Esc ou clicar fora termina.
+- TIMELINE: a faixa de vídeo é uma fila de clips encostados, como num editor normal. Clica num
+  clip para o selecionar; arrasta-o para outro sítio; puxa as pontas para cortar (ou recuperar o
+  que cortaste). Ctrl+B divide no cursor, Ctrl+D duplica o clip (cópia inteira logo a seguir),
+  Delete apaga-o e o resto encosta. I / O cortam o clip debaixo do cursor até ao cursor.
+  Zoom da timeline: roda do rato em cima da timeline (à volta do rato), a barra ao lado de
+  «Ajustar» ou − / +; «Ajustar» volta a mostrar tudo. Shift+roda anda para os lados; Alt+roda
+  sobe/desce quando há muitas faixas.
+  Textos, imagens e música ficam no sítio da timeline onde os puseste (não andam com os clips).
+- VÍDEOS NOS ELEMENTOS: um vídeo (ou GIF) de «+ Ficheiro» entra no cursor com a duração original do
+  ficheiro, não ocupa o clip todo. Se o cortares e guardares num template, num clip mais curto ele
+  mantém a mesma duração: o vídeo final estica até ele acabar e, nesse bocado, fica parado o último
+  frame do clip (aparece riscado na faixa de vídeo como «Último frame»).
+- Cada aba é um clip: abrir outro ficheiro ou um «Recente» com um clip já aberto abre uma aba nova.
 - Formatos (1080x1920):
   · Streamer (abre por omissão na primeira vez; depois abre no último formato usado) — câmara em cima; arrasta a divisão diretamente no resultado. Em baixo escolhes:
       - Jogo: a parte do clip que vai para baixo (caixa azul no original).
@@ -144,13 +166,13 @@ EDITOR PARA TIKTOK
     (imagens, GIFs e vídeos; converte para MP4 H.264 quando necessário).
   · Vertical — moldura 9:16. Arrastar/fazer zoom só ajusta a posição: fica fixa em todo o clip,
     nunca cria pontos novos sozinho por estares a meio do vídeo. Para a moldura se mover durante o
-    clip, carrega em «◆ Posição aqui» (no painel «Posições da moldura») no instante onde queres o
+    clip, carrega em «◆ Posição aqui» ou prime P (no formato Vertical, painel «Moldura») no instante onde queres o
     próximo ponto e ajusta-o; cada sítio fica marcado (◆ na barra) e a moldura desliza suavemente
     entre eles. Os ◆ arrastam-se na barra para mudar o instante (não passam por cima dos
     vizinhos); clique = ir para lá; botão direito (ou duplo clique) = apagar.
   · Desfocado — vídeo ao centro com o fundo desfocado. Em «Zoom do vídeo», usa o controlo
-    ou os botões − / + para aproximar até 400%. Também podes usar a roda do rato sobre o vídeo
-    no resultado e arrastar para enquadrar. «Repor enquadramento» volta a 100% e centra o vídeo.
+    ou os botões − / + para aproximar até 400%. Também podes clicar no vídeo no resultado e usar
+    a roda/os cantos da moldura e arrastar para enquadrar. «Repor enquadramento» volta a 100% e centra o vídeo.
     O zoom é aplicado à exportação, sem ampliar os textos ou as imagens livres. Pode ser desfeito
     com Ctrl+Z e fica guardado na sessão e nos templates.
   · Original — mantém o formato da fonte, com os mesmos controlos de zoom e enquadramento.
@@ -185,26 +207,32 @@ EDITOR PARA TIKTOK
   os textos, imagens livres e faixas de áudio como estavam, incluindo posição, tamanho, rotação e duração
   («edição recuperada» em baixo).
 - O seletor «Recentes» no topo guarda até 12 clips de origem e recupera a edição de cada um.
-  No botão direito de um segmento da timeline, «Duplicar segmento» repete-o na montagem atual;
-  «Abrir segmento noutra aba» cria uma edição independente limitada àquele intervalo.
+  No botão direito de um clip da timeline, «Duplicar clip» repete-o a seguir;
+  «Abrir este clip noutra aba» cria uma edição independente limitada àquele intervalo.
   As alterações nessa aba não mexem na montagem original.
 - Também dá para abrir qualquer clip antigo: «Abrir clip…» ou arrastar o ficheiro para o editor.
 
 NOTAS
 - Os clips chegam ao editor em MP4 (H.264 + AAC). Se a captura usar outro formato,
   a extensão converte-o automaticamente; esta preparação pode demorar mais tempo.
-- A reserva só conta segmentos com dados recebidos. Se a captura deixar de produzir dados,
+- A reserva só conta vídeo realmente recebido. Se a captura deixar de produzir dados,
   a extensão tenta reiniciá-la e usar outro codificador. Uma reserva de 0s não contém vídeo anterior.
 - Procurar outra posição no vídeo reinicia a reserva, para não juntar imagens de instantes diferentes.
   Se a descarga falhar logo após o seek, o clip pode ser parcial enquanto o buffer volta a encher.
 - Se a descarga falhar, usa o trecho que estava em reserva no instante do clique.
   Clips mais curtos são identificados como parciais; se o buffer estiver vazio, tenta recuperar
   um trecho novo e avisa que foi capturado depois do clique.
-- O buffer adapta o bitrate à resolução e aos FPS do vídeo; os segmentos de 8s reduzem reinícios
-  do codificador. O clip pode ter até ~8s a mais do que o escolhido.
+- O buffer grava de forma contínua (um só codificador, sem juntas entre pedaços — era isso que
+  dava pequenos saltos/pausas de 8 em 8 s) com bitrate adaptado à resolução e aos FPS.
+  O clip começa num keyframe, por isso pode ter até ~1s a mais do que o escolhido.
+- Se o editor abrir mas o clip demorar (fila de clips, recodificação), a aba espera por ele até
+  15 min. Se mesmo assim não chegar, está em «Recentes» assim que ficar pronto.
 - Na 1ª vez que fazes um clip numa aba, demora uns segundos a carregar o motor de vídeo (ffmpeg.wasm).
 - O som é gravado do próprio vídeo: se o player estiver em mute, o clip fica sem som.
-- Mudar de qualidade/vídeo ou procurar outra posição reinicia o buffer.
+- Procurar outra posição ou mudar de vídeo reinicia o buffer. Mudar de qualidade não apaga nada
+  (o clip que atravesse a troca é recodificado para um tamanho só).
+- Na timeline, um elemento a tracejado não aparece no vídeo final (está num trecho cortado, ou o
+  ficheiro já não está na biblioteca) — passa o rato por cima para ver porquê.
 
 MODO LIVE
 - O clip começa sempre num keyframe, por isso pode ter uns segundos a mais no início

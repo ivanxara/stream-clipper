@@ -43,6 +43,7 @@ const assert = require('node:assert/strict');
         }
       };
     });
+    await page.addScriptTag({ content: fs.readFileSync(path.join(root, 'webmbuf.js'), 'utf8') });
     const content = fs.readFileSync(path.join(root, 'content.js'), 'utf8').replace(/\}\)\(\);\s*$/, 'window.__capture = { state, tick, bufferedSeconds }; })();');
     await page.addScriptTag({ content });
     await page.waitForFunction(() => window.__capture?.state.current);
@@ -53,7 +54,10 @@ const assert = require('node:assert/strict');
     }
     await page.waitForFunction(() => __capture.bufferedSeconds() >= 1, { timeout: 15000 });
     assert.match(await page.evaluate(() => __capture.state.mime), /vp8/);
-    const beforeSeek = await page.evaluate(() => __capture.state.segments.map(segment => segment.start));
+    // O servidor de teste não aceita Range: um seek vai sempre para 0. Com mais de 3,5 s tocados, o
+    // salto é sempre maior do que os 2 s que o buffer considera um seek a sério.
+    await page.waitForFunction(() => document.querySelector('video').currentTime > 3.5, { timeout: 15000 });
+    await page.evaluate(() => { window.__runsBeforeSeek = __capture.state.runs.slice(); });
     await page.evaluate(async () => {
       const video = document.querySelector('video');
       const target = video.currentTime < video.duration / 2 ? video.duration * 0.75 : video.duration * 0.25;
@@ -61,8 +65,8 @@ const assert = require('node:assert/strict');
       video.currentTime = target;
       await seeked;
     });
-    assert.equal(await page.evaluate((previous) => __capture.state.segments.some(segment => previous.includes(segment.start)), beforeSeek), false,
-      'the capture buffer must not retain segments from before the seek');
+    assert.equal(await page.evaluate(() => __capture.state.runs.some(run => window.__runsBeforeSeek.includes(run))), false,
+      'the capture buffer must not retain recordings from before the seek');
     await page.waitForFunction(() => __capture.bufferedSeconds() >= 1, { timeout: 15000 });
     const popupPromise = page.waitForEvent('popup');
     await page.click('.sc-clip[data-s="15"]');

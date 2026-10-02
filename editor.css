@@ -35,15 +35,33 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 .stage video[hidden] { display: none; }
 #overlay { position: absolute; inset: 0; pointer-events: none; }
+/* Seguir alvo: a desenhar o quadrado no original (as molduras ficam por baixo, sem agarrar). */
+#overlay.marking { pointer-events: auto; cursor: crosshair; background: rgba(0, 0, 0, .25); }
+#overlay.marking .rect { pointer-events: none; opacity: .35; }
+.trackBox { position: absolute; border: 2px dashed #facc15; background: rgba(250, 204, 21, .12); box-shadow: 0 0 0 1px #0009; pointer-events: none; }
 .drop { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 12px; color: var(--muted); border: 2px dashed var(--line); border-radius: 10px; }
 .stage.loaded .drop { display: none; }
 .stage.dragover .drop { display: grid; border-color: var(--accent); color: var(--text); background: rgba(145, 70, 255, .12); }
 
 .resultBox { grid-area: result; position: relative; align-self: center; justify-self: center; width: 100%;
   aspect-ratio: var(--ra, 9 / 16); max-height: 100%; background: #000; border-radius: 10px; overflow: hidden; }
+/* A vista (canvas + molduras) leva o zoom/deslocamento; a barra do elemento e o indicador de zoom
+   ficam fora dela, para não crescerem com o zoom. */
+.resultView { position: absolute; inset: 0; transform-origin: 0 0; }
 #preview { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-#preview.edit { cursor: grab; }
-#preview.edit:active { cursor: grabbing; }
+#preview.pick { cursor: pointer; }
+#preview.pan, #preview.edit { cursor: grab; }
+#preview.edit:active, #preview.panning { cursor: grabbing; }
+.viewZoom { position: absolute; right: 8px; bottom: 8px; z-index: 6; display: flex; align-items: center; gap: 2px; padding: 3px; border: 1px solid #5e536c; border-radius: 8px; background: #1c1a23e8; color: #fff; font-size: 11px; font-variant-numeric: tabular-nums; }
+.viewZoom[hidden] { display: none; }
+.viewZoom button { border: 0; background: transparent; color: #fff; cursor: pointer; font: inherit; padding: 3px 7px; border-radius: 4px; }
+.viewZoom button:hover { background: #44305f; }
+.viewZoom span { min-width: 38px; text-align: center; }
+/* Pegas e molduras mantêm o tamanho no ecrã, seja qual for o zoom da vista. */
+.zoneZoom, .elementGrip, .elementRotate { scale: calc(1 / var(--vz, 1)); }
+.elementFrame { border-width: calc(1.5px / var(--vz, 1)); }
+.inlineText { position: absolute; z-index: 5; margin: 0; padding: 0; border: 0; outline: calc(1px / var(--vz, 1)) dashed #c6a3ffcc; outline-offset: 4px; background: transparent; color: transparent; resize: none; overflow: hidden; white-space: pre-wrap; overflow-wrap: break-word; }
+.inlineText::selection { background: #9146ff66; color: transparent; }
 .videoZoomRow { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
 .videoZoomRow input { flex: 1; min-width: 0; width: 0; }
 .videoZoomRow button { min-width: 30px; font-size: 17px; }
@@ -52,14 +70,19 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .splitDivider::before { content: ''; position: absolute; left: 0; right: 0; top: 8px; height: 2px; background: #22c55e; box-shadow: 0 0 2px #000; }
 .splitDivider span { position: relative; display: inline-block; padding: 2px 9px; border-radius: 8px; background: #183c29; border: 1px solid #4ade80; font-size: 11px; }
 .splitDivider:hover span, .splitDivider:focus-visible span { background: #245c3e; }
-.splitBottomFrame { position: absolute; left: 1px; right: 1px; bottom: 1px; border: 2px solid var(--game); pointer-events: none; z-index: 1; }
-.splitZoneLabel { position: absolute; left: 8px; top: 9px; color: #b9edff; background: #101c27d9; border-radius: 4px; padding: 2px 5px; font-size: 10px; }
-.splitZoom { position: absolute; width: 14px; height: 14px; border: 2px solid var(--game); border-radius: 3px; background: #fff; pointer-events: auto; touch-action: none; }
-.splitZoom.nw { top: 6px; left: 6px; cursor: nwse-resize; }
-.splitZoom.ne { top: 6px; right: 6px; cursor: nesw-resize; }
-.splitZoom.sw { bottom: 6px; left: 6px; cursor: nesw-resize; }
-.splitZoom.se { bottom: 6px; right: 6px; cursor: nwse-resize; }
-.splitDivider[hidden], .splitBottomFrame[hidden] { display: none; }
+/* Zona selecionada no resultado (clicar para editar): moldura com pegas de zoom nos cantos. */
+.zoneFrame { position: absolute; left: 0; right: 0; box-sizing: border-box; border: calc(2px / var(--vz, 1)) solid var(--game); box-shadow: inset 0 0 0 calc(1px / var(--vz, 1)) #0008; pointer-events: none; z-index: 1; }
+.zoneFrame[data-zone="cam"] { border-color: #f59e0b; }
+.zoneFrame[data-zone="crop"], .zoneFrame[data-zone="framing"] { border-color: #c6a3ff; }
+.zoneLabel { position: absolute; left: 8px; top: 8px; color: #fff; background: #101c27d9; border-radius: 4px; padding: 2px 6px; font-size: 10px; transform-origin: 0 0; scale: calc(1 / var(--vz, 1)); white-space: nowrap; }
+.zoneZoom { position: absolute; width: 14px; height: 14px; padding: 0; border: 2px solid currentColor; border-radius: 3px; background: #fff; color: var(--game); pointer-events: auto; touch-action: none; }
+.zoneFrame[data-zone="cam"] .zoneZoom { color: #f59e0b; }
+.zoneFrame[data-zone="crop"] .zoneZoom, .zoneFrame[data-zone="framing"] .zoneZoom { color: #9146ff; }
+.zoneZoom.nw { top: 6px; left: 6px; cursor: nwse-resize; }
+.zoneZoom.ne { top: 6px; right: 6px; cursor: nesw-resize; }
+.zoneZoom.sw { bottom: 6px; left: 6px; cursor: nesw-resize; }
+.zoneZoom.se { bottom: 6px; right: 6px; cursor: nwse-resize; }
+.splitDivider[hidden], .zoneFrame[hidden] { display: none; }
 
 .rect { position: absolute; border: 2px solid var(--accent-2); box-shadow: 0 0 0 9999px rgba(0, 0, 0, .45); pointer-events: auto; cursor: move; border-radius: 2px; }
 .rect.cam { border-color: var(--cam); box-shadow: none; }
@@ -104,7 +127,10 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .timeline .playhead { position: absolute; top: 1px; width: 2px; height: 32px; margin-left: -1px; background: #fff; pointer-events: none; z-index: 5; }
 .timeline .kf { position: absolute; top: 11px; width: 12px; height: 12px; margin-left: -6px; transform: rotate(45deg); background: var(--accent-2); border: 1px solid #fff; cursor: ew-resize; touch-action: none; z-index: 2; }
 .timeline .kf:hover, .timeline .kf.drag { transform: rotate(45deg) scale(1.35); background: #fff; }
-.timeline .kf::after { content: ""; position: absolute; inset: -7px; }   /* área maior para agarrar */
+.timeline .kf::after { content: ""; position: absolute; inset: -7px; }
+/* Posições criadas pelo seguimento: muitas e seguidas, por isso mais discretas. */
+.timeline .kf.path { width: 6px; height: 6px; margin-left: -3px; top: 13px; background: #facc15; border-color: #0008; }
+.timeline .kf.path::after { inset: -5px; }   /* área maior para agarrar */
 .hint { color: var(--muted); font-size: 12px; margin: 2px 8px 0; min-height: 1.4em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .btn { appearance: none; border: 1px solid var(--line); background: #22222a; color: var(--text); border-radius: 8px; padding: 6px 11px; cursor: pointer; font: inherit; }
@@ -134,7 +160,7 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .sideCard { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
 .optsWrap { min-height: 0; overflow: auto; padding: 12px; }
 .sceneCard { flex: 0 1 auto; max-height: 48%; min-height: 120px; display: flex; flex-direction: column; gap: 10px; }
-.elementsCard { flex: 1 1 auto; min-height: 155px; }
+.elementsCard { flex: 1 1 auto; min-height: 155px; padding: 10px 12px; }
 .sceneCard .layouts { display: grid; grid-template-columns: repeat(4, 1fr); flex: none; }
 .sceneCard .layout { justify-content: center; padding: 6px; }
 .layout svg { width: 25px; height: 30px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
@@ -145,16 +171,22 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .layout .sharpPart { fill: #24202f; stroke: #ddd3ee; }
 .sceneCard .cardTitle { margin: 0; }
 .optsWrap h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 6px 0 0; }
-.exportBar { flex: none; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.exportBar { flex: none; padding: 9px; display: flex; flex-direction: column; gap: 5px; }
+.exportFooter { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; min-width: 0; }
 .exportBar .keys { font-size: 11px; margin: 0; line-height: 1.8; }
 
 .opt { display: flex; flex-direction: column; gap: 8px; }
 .opt label { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
 .opt input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.cropOpt { gap: 6px; }
+.cropActions { display: flex; gap: 6px; }
+.cropActions #addCropKey { flex: 1; }
+.cropActions kbd { margin-left: 6px; color: var(--muted); }
+.cropOpt .btn.primary { padding: 4px 9px; }
 
 .progress { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .progress div { height: 100%; width: 0; background: var(--accent); transition: width .1s linear; }
-.status { font-size: 12px; min-height: 1.4em; margin: 0; }
+.status { flex: 1; min-width: 0; font-size: 11px; line-height: 1.3; margin: 0 0 2px; overflow-wrap: anywhere; }
 
 /* Streamer: jogo ou imagem/vídeo em baixo */
 .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: #15151b; border: 1px solid var(--line); border-radius: 8px; padding: 3px; }
@@ -254,25 +286,30 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip { border: 1px solid var(--line); background: #1d1d24; color: var(--text); border-radius: 999px; padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip.on { border-color: var(--accent); background: rgba(145, 70, 255, .22); }
-#tText { width: 100%; resize: vertical; min-height: 44px; background: #1d1d24; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font: inherit; font-weight: 600; }
+#tText { width: 100%; resize: vertical; min-height: 38px; background: #1d1d24; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 3px 8px; font: inherit; font-weight: 600; }
 #tText:focus { outline: none; border-color: var(--accent); }
-.textPresetGroup { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
-.textPresetGroup h3 { margin: 0; color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; }
-.textPresetGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
-.textPreset { display: flex; min-width: 0; align-items: center; gap: 8px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: #1d1d24; color: var(--text); text-align: left; cursor: pointer; font: inherit; font-size: 11px; }
+#textOpts > .opt { gap: 3px; }
+.elementHeader { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.elementHeader h2 { flex: none; margin: 0; }
+.elementAdd { flex: 1; min-width: 0; }
+.elementAdd button { padding: 4px 2px; font-size: 11px; white-space: nowrap; }
+.textPresetGroup { display: flex; flex-direction: column; gap: 4px; margin: 0; }
+.textPresetGroup h3 { margin: 0; color: var(--muted); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.textPresetGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+.textPreset { display: flex; min-width: 0; min-height: 25px; align-items: center; gap: 5px; padding: 2px 5px; border: 1px solid var(--line); border-radius: 6px; background: #1d1d24; color: var(--text); text-align: left; cursor: pointer; font: inherit; font-size: 10px; }
 .textPreset:hover { border-color: #77717f; background: #25232d; }
 .textPreset.on, .textPreset[aria-pressed="true"] { border-color: var(--accent); background: #352149; }
 .textPreset:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
-.presetPreview { display: grid; width: 46px; height: 28px; flex: none; place-items: center; overflow: hidden; border-radius: 4px; background: #111116; color: #fff; font-size: 15px; white-space: nowrap; }
+.presetPreview { display: grid; width: 32px; height: 21px; flex: none; place-items: center; overflow: hidden; border-radius: 4px; background: #111116; color: #fff; font-size: 12px; white-space: nowrap; }
 .presetPreview--subtitle { font-family: "Montserrat", sans-serif; font-weight: 900; -webkit-text-stroke: .45px #111; text-shadow: 1px 1px 1px #111; }
 .presetPreview--box { padding: 0 3px; background: #050505; font-family: "Montserrat", sans-serif; font-size: 13px; font-weight: 900; }
 .presetPreview--highlight { background: #ffe600; color: #111; font-family: Anton, Impact, sans-serif; font-size: 14px; }
-.presetPreview--headline { font-family: "Bebas Neue", Impact, sans-serif; font-size: 18px; -webkit-text-stroke: .4px #111; }
+.presetPreview--headline { font-family: "Bebas Neue", Impact, sans-serif; font-size: 15px; -webkit-text-stroke: .4px #111; }
 .presetName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .uppercaseToggle { flex: none; min-width: 34px; padding: 4px 6px; font-weight: 800; }
 .uppercaseToggle.on { border-color: var(--accent); background: #352149; color: #fff; }
 .swatches { gap: 5px; }
-.sw { width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--line); cursor: pointer; padding: 0; flex: none; }
+.sw { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line); cursor: pointer; padding: 0; flex: none; }
 .sw.on { border-color: var(--accent-2); box-shadow: 0 0 0 2px var(--accent); }
 .sw.pick { position: relative; overflow: hidden; background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red); }
 .sw.pick input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
@@ -280,25 +317,33 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .seg.icons { flex: none; width: 108px; }
 .seg.icons button { display: grid; place-items: center; padding: 4px; }
 .seg.icons svg { width: 16px; height: 16px; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; fill: none; }
+.elementOptions[open] > .opt { gap: 3px; }
+.elementOptions .seg button { padding: 4px 5px; }
+.elementOptions .row.pos { gap: 4px; }
+.elementOptions .row.pos .btn { flex: none; padding: 3px 4px; font-size: 11px; white-space: nowrap; }
+.elementOptions .rotationRow { display: flex; justify-content: flex-start; gap: 5px; font-size: 11px; color: var(--muted); }
+.rotationRow input { margin-left: auto; }
 .tools select, .fontRow select { flex: 1; min-width: 0; background: #1d1d24; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; font: inherit; }
 /* combo de tamanho: escolhe uma sugestão (datalist) ou escreve um número, como no Word */
-.sizeCombo { flex: 1; min-width: 0; }
-.sizeCombo input { width: 100%; background: #1d1d24; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; font: inherit; }
+.row.tools .uppercaseToggle { flex: 0 0 30px; min-width: 30px; padding: 4px 0; }
+.sizeCombo { position: relative; flex: 1 1 80px; min-width: 80px; }
+.sizeLabel { position: absolute; left: 6px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--muted); font-size: 10px; }
+.sizeCombo input { width: 100%; background: #1d1d24; color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 5px 4px 5px 34px; font: inherit; font-variant-numeric: tabular-nums; }
 .sizeCombo input:focus { outline: none; border-color: var(--accent); }
 .row.pos .btn { flex: 1 1 auto; padding: 4px 6px; }
 .check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
 .elementList { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow-y: auto; }
 .elementRow { display: flex; align-items: center; border: 1px solid var(--line); background: #1d1d24; border-radius: 7px; }
 .elementRow.on { border-color: var(--accent); background: #9146ff20; }
-.elementSelect { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 8px; border: 0; color: var(--text); background: transparent; text-align: left; cursor: pointer; font: inherit; }
+.elementSelect { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 6px 8px; border: 0; color: var(--text); background: transparent; text-align: left; cursor: pointer; font: inherit; }
 .elementType { color: var(--accent-2); font-weight: 600; width: 16px; text-align: center; flex: none; }
 .elementType img { display: block; width: 16px; height: 16px; object-fit: contain; border-radius: 2px; }
 .elementName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .elementDelete { all: unset; flex: none; box-sizing: border-box; width: 30px; height: 100%; display: grid; place-items: center; color: var(--muted); cursor: pointer; border-left: 1px solid var(--line); border-radius: 0 6px 6px 0; }
 .elementDelete:hover, .elementDelete:focus-visible { color: #fca5a5; background: rgba(165, 44, 54, .3); }
-.elementOptions summary { cursor: pointer; padding: 6px 0; color: var(--muted); font-size: 12px; }
-.elementOptions[open] summary { margin-bottom: 6px; color: var(--text); }
-.helpButton { align-self: flex-end; color: var(--muted); }
+.elementOptions summary { cursor: pointer; padding: 3px 0; color: var(--muted); font-size: 12px; }
+.elementOptions[open] summary { margin-bottom: 3px; color: var(--text); }
+.exportFooter .helpButton { flex: none; width: 24px; height: 24px; padding: 0; line-height: 1; color: var(--muted); }
 .helpDlg p { margin: 0; line-height: 1.6; color: var(--muted); }
 .shortcutList { display: grid; grid-template-columns: 1fr auto; gap: 9px 12px; margin: 0; font-size: 12px; }
 .shortcutList dd { margin: 0; text-align: right; }
@@ -332,10 +377,21 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .elementGuide { position: absolute; pointer-events: none; z-index: 2; background: #f472b6; }
 .elementGuide.vertical { top: 0; bottom: 0; width: 1px; left: 50%; }
 .elementGuide.horizontal { left: 0; right: 0; height: 1px; }
-#elementAngle { width: 75px; padding: 5px; border: 1px solid var(--line); border-radius: 5px; background: #22222a; color: var(--text); }
+#elementAngle { width: 60px; padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px; background: #22222a; color: var(--text); }
 .bottom { background: var(--panel); padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
-.tracksWrap { position: relative; max-height: 172px; min-height: 0; overflow-y: auto; margin-top: 7px; padding-bottom: 2px; }
-.elementRuler { display: flex; justify-content: space-between; margin-left: 102px; height: 17px; font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* A faixa pode ser mais larga do que a janela (zoom): desloca-se na horizontal; a coluna dos
+   nomes e a régua ficam presas (sticky). */
+/* Barras finas; a horizontal fica sempre (overflow-x: scroll) e a vertical tem o lugar reservado
+   (scrollbar-gutter), para a timeline não saltar quando aparecem/desaparecem. */
+.tracksWrap { position: relative; max-height: 190px; min-height: 0; overflow-x: scroll; overflow-y: auto; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #5b4a7a transparent; margin-top: 7px; padding-bottom: 2px; }
+.tracksInner { position: relative; min-width: 100%; }
+.elementRuler { position: sticky; top: 0; z-index: 5; margin-left: 102px; height: 17px; font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; background: var(--panel); }
+.elementRuler .tick { position: absolute; bottom: 0; height: 4px; border-left: 1px solid #3a3a46; }
+.elementRuler .tick.major { height: 16px; border-left-color: #5a5a68; padding-left: 3px; line-height: 11px; white-space: nowrap; }
+.elementRuler .rulerEnd { position: absolute; top: 0; bottom: 0; border-left: 2px solid #ffca7966; }
+.zoomTools { display: flex; gap: 3px; align-items: center; }
+.zoomTools .btn { min-width: 28px; }
+#tlZoom { width: 110px; accent-color: #9146ff; }
 .elementTrack { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 8px; margin-bottom: 2px; height: 23px; }
 /* Fixa a coluna do nome (elemento/áudio/vídeo) ao fazer scroll horizontal na timeline, para se
    ver sempre a que faixa corresponde cada bloco, mesmo a meio de uma timeline longa. */
@@ -354,10 +410,16 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 .elementBlock.imageBlock { background: #234d59; border-color: #3b9bab; }
 .elementBlock.imageBlock.on { border-color: #b5f5ff; }
 .blockName { flex: 1; min-width: 0; padding: 0 13px; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; pointer-events: none; }
-.timeGrip { position: absolute; left: -17px; top: 0; bottom: 0; width: 20px; cursor: ew-resize; background: transparent; z-index: 2; }
-.timeGrip::after { content: ''; position: absolute; left: 15px; top: 4px; bottom: 4px; width: 3px; border-radius: 2px; background: #ffffffc0; }
-.timeGrip.end { left: auto; right: -17px; }
-.timeGrip.end::after { left: 2px; }
+/* As pegas ficam quase todas DENTRO do bloco: antes a da esquerda saía 17px para fora e, num
+   elemento a começar no 0, ficava por baixo da coluna do nome (sticky, z-index 3) — só sobravam
+   uns píxeis para agarrar e o clique caía no "mover". */
+.timeGrip { position: absolute; left: -5px; top: 0; bottom: 0; width: 14px; cursor: ew-resize; background: transparent; z-index: 2; }
+.timeGrip::after { content: ''; position: absolute; left: 6px; top: 4px; bottom: 4px; width: 3px; border-radius: 2px; background: #ffffffc0; }
+.timeGrip.end { left: auto; right: -5px; }
+.timeGrip.end::after { left: 5px; }
+.timeGrip:hover::after { background: #fff; box-shadow: 0 0 0 1px #9146ff; }
+/* Elemento que não entra no vídeo final (fora do trecho exportado, ou ficheiro em falta). */
+.elementBlock.unseen { opacity: .55; border-style: dashed; background-image: repeating-linear-gradient(135deg, transparent 0 5px, #ffffff14 5px 10px); }
 .tracksHeadWrap { position: absolute; left: 102px; right: 0; top: 17px; bottom: 0; pointer-events: none; }
 #tracksHead { position: absolute; width: 1px; background: #fff; top: 0; bottom: 0; }
 #tracksHead::before { content: ''; position: absolute; left: -3px; top: -4px; width: 7px; height: 7px; background: #fff; transform: rotate(45deg); }
@@ -372,18 +434,31 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 #removeSegment[hidden] { display: none; }
 #splitClip { background: #6832b2; border-color: #9655ec; }
 .tracksWrap { padding-right: 8px; }
-.elementRuler { position: relative; cursor: ew-resize; touch-action: none; border-bottom: 1px solid var(--line); margin-bottom: 5px; }
-.elementRuler span { border-left: 1px solid #454550; padding-left: 4px; }
+.elementRuler { cursor: ew-resize; touch-action: none; border-bottom: 1px solid var(--line); margin-bottom: 5px; }
 .videoTrackRow { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 8px; align-items: center; margin-top: 3px; }
 .videoTrackRow .trackLabel { cursor: default; }
 .timeline { height: 31px; margin: 0; }
 .timeline .track { top: 0; height: 31px; border-radius: 5px; background: #101015; }
-.timeline .range { top: 2px; height: 27px; border-radius: 4px; background: linear-gradient(135deg, #46316a, #312644); color: #f0e7ff; text-align: left; padding: 0 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font: 11px ui-monospace, Consolas, monospace; }
+.timeline .range { top: 2px; height: 27px; border-radius: 4px; background: linear-gradient(135deg, #46316a, #312644); color: #f0e7ff; text-align: left; padding: 0 14px; overflow: hidden; white-space: nowrap; font: 11px ui-monospace, Consolas, monospace; display: flex; align-items: center; cursor: grab; touch-action: none; user-select: none; min-width: 6px; }
+.timeline .range:active { cursor: grabbing; }
+.timeline .range.current::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: #ffca79aa; }
+.segLabel { overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+/* Pegas das pontas de cada clip: puxar para cortar ou recuperar o que foi cortado. */
+.segGrip { position: absolute; top: 0; bottom: 0; width: 10px; cursor: ew-resize; z-index: 2; }
+.segGrip.in { left: 0; }
+.segGrip.out { right: 0; }
+.segGrip::after { content: ''; position: absolute; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; background: #ffffff70; }
+.segGrip.in::after { left: 3px; }
+.segGrip.out::after { right: 3px; }
+.range:hover .segGrip::after, .range.active .segGrip::after { background: #fff; }
+.dropMarker { position: absolute; top: -2px; bottom: -2px; width: 3px; margin-left: -1px; background: #fff; border-radius: 2px; box-shadow: 0 0 6px #fff; z-index: 6; pointer-events: none; }
+.dropMarker[hidden] { display: none; }
+.timeline .tailRange { position: absolute; top: 2px; height: 27px; box-sizing: border-box; border: 1px dashed #8b7aa8; border-radius: 4px; background: repeating-linear-gradient(135deg, #2a2236 0 6px, #1d1826 6px 12px); color: #bfb2d6; font-size: 10px; display: flex; align-items: center; padding: 0 8px; overflow: hidden; white-space: nowrap; pointer-events: none; }
 .timeline .range.active { background: linear-gradient(135deg, #674294, #43305f); box-shadow: inset 0 0 0 1px #e4cfff; border-color: #e4cfff; }
 .timeline .range.sequenceRange { background: linear-gradient(135deg, #245267, #213c54); border-color: #4ca5c9; }
 .timeline .range.sequenceRange.active { background: linear-gradient(135deg, #32708b, #29506e); border-color: #b9edff; box-shadow: inset 0 0 0 1px #b9edff; }
 /* Arrastar um segmento para reordenar a exportação: mostra de que lado vai entrar. */
-.timeline .range.dragging { opacity: .35; }
+.timeline .range.dragging { opacity: .75; z-index: 5; box-shadow: 0 4px 14px #000a; }
 .timeline .range.dragOverBefore { box-shadow: inset 3px 0 0 0 #fff; }
 .timeline .range.dragOverAfter { box-shadow: inset -3px 0 0 0 #fff; }
 .timeline .handle { top: 1px; height: 29px; width: 10px; margin-left: -5px; box-shadow: 0 1px 5px #0006; }
@@ -438,7 +513,7 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 
 /* legenda + exportar para o TikTok */
 .expRow { display: grid; grid-template-columns: auto 1fr; gap: 6px; }
-.expRow .btn { padding: 10px; font-weight: 600; white-space: nowrap; }
+.expRow .btn { padding: 7px 8px; font-weight: 600; white-space: nowrap; }
 .btn.primary.tt { background: linear-gradient(90deg, #25f4ee -40%, #9146ff 40%, #fe2c55 140%); border-color: transparent; }
 .btn.primary.tt:hover:not(:disabled) { filter: brightness(1.1); background: linear-gradient(90deg, #25f4ee -40%, #9146ff 40%, #fe2c55 140%); }
 
@@ -483,5 +558,6 @@ main { display: grid; gap: 10px; padding: 10px; height: calc(100% - var(--hdr));
 #ttGo:disabled kbd { display: none; }
 
 .progRow { display: flex; align-items: center; gap: 8px; }
+.progRow:has(#progress[hidden]):has(#cancelExp[hidden]) { display: none; }
 .progRow .progress { flex: 1; }
 .progRow .btn[hidden] { display: none; }

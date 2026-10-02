@@ -113,7 +113,7 @@ const { pathToFileURL } = require('node:url');
     // Export: compare transparent/opaque/semi-transparent pixels against the main video.
     const encoded=await page.evaluate(async ()=>{
       const Native=window.VideoEncoder,samples=[],c=new OffscreenCanvas(320,180),ctx=c.getContext('2d');
-      __editor.st.start=0;__editor.st.end=1.5;__editor.st.parts=[{start:0,end:.5},{start:.75,end:1.5}];
+      __editor.st.parts=[{start:0,end:.5},{start:.75,end:1.5}];
       window.VideoEncoder=class {
         constructor(init){this.encoder=new Native(init);}static isConfigSupported(c){return Native.isConfigSupported(c);}
         configure(c){this.encoder.configure(c);}get encodeQueueSize(){return this.encoder.encodeQueueSize;}

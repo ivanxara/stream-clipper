@@ -24,7 +24,21 @@ async function getFFmpeg(id) {
   return loading;
 }
 
-async function handleClip({ id, parts, h264, out, name, save }) {
+async function handleClip({ id, parts, h264, out, name, save, clipId, channel }) {
+  // Sinal de vida para a aba da live (que só desiste se o processador ficar calado muito tempo):
+  // o progresso do ffmpeg, no máximo 1×/s.
+  function watchProgress(ff, id, label) {
+    let last = 0;
+    const onProgress = ({ progress }) => {
+      const t = Date.now();
+      if (t - last < 1000) return;
+      last = t;
+      const pct = progress > 0 && progress <= 1 ? ` ${Math.round(progress * 100)}%` : '';
+      post({ type: 'progress', id, text: label + pct });
+    };
+    ff.on('progress', onProgress);
+    return () => ff.off('progress', onProgress);
+  }
   // Se o ffmpeg abortar (ex.: sem memória) o motor fica inutilizável para sempre — todos os
   // clips seguintes falhariam da mesma forma até a página ser recarregada. Ao descartá-lo aqui,
   // o próximo clip arranca com um motor novo.
@@ -37,6 +51,7 @@ async function handleClip({ id, parts, h264, out, name, save }) {
     const log = [];
     const onLog = ({ message }) => { log.push(message); if (log.length > 60) log.shift(); };
     ff.on('log', onLog);
+    const unwatch = watchProgress(ff, id, label === 'cópia' ? 'A juntar o clip…' : 'A recodificar o clip…');
     try {
       let code;
       try { code = await ff.exec(args); }
@@ -45,6 +60,7 @@ async function handleClip({ id, parts, h264, out, name, save }) {
       return await ff.readFile('out.mp4');
     } finally {
       ff.off('log', onLog);
+      unwatch();
     }
   }
 
@@ -54,8 +70,14 @@ async function handleClip({ id, parts, h264, out, name, save }) {
   const baseArgs = ['-hide_banner', '-f', 'concat', '-safe', '0', '-i', 'list.txt'];
   const tail = ['-movflags', '+faststart', '-avoid_negative_ts', 'make_zero', '-y', 'out.mp4'];
   const strategies = [];
-  if (h264) strategies.push({ label: 'cópia', args: [...baseArgs, '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', ...tail] });
-  strategies.push({ label: 'recodificar', args: [...baseArgs, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', ...tail] });
+  // Partes com resoluções diferentes (o player mudou de qualidade a meio): copiar dava um MP4 com
+  // a imagem estragada a partir da troca. Recodifica tudo para o tamanho da maior.
+  const sized = parts.filter((p) => p.width > 0 && p.height > 0);
+  const mixed = sized.some((p) => p.width !== sized[0].width || p.height !== sized[0].height);
+  const big = sized.reduce((a, p) => (p.width * p.height > a.width * a.height ? p : a), { width: 0, height: 0 });
+  const fit = mixed ? ['-vf', `scale=${big.width}:${big.height}:force_original_aspect_ratio=decrease,pad=${big.width}:${big.height}:(ow-iw)/2:(oh-ih)/2,setsar=1`] : [];
+  if (h264 && !mixed) strategies.push({ label: 'cópia', args: [...baseArgs, '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', ...tail] });
+  strategies.push({ label: 'recodificar', args: [...baseArgs, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', ...fit, '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', ...tail] });
   strategies.push({
     label: 'recodificar (leve)',
     args: [...baseArgs, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-vf', "scale='min(1280,iw)':-2", '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', ...tail],
@@ -82,7 +104,7 @@ async function handleClip({ id, parts, h264, out, name, save }) {
       const data = await execOnce(ff, strategies[attempt].args, strategies[attempt].label);
       files.push('out.mp4');
       const blob = new Blob([data], { type: 'video/mp4' });
-      await download(id, blob, name.replace(/\.webm$/i, '.mp4'), save);
+      await download(id, blob, name.replace(/\.webm$/i, '.mp4'), save, false, { clipId, channel });
       for (const f of files) { try { await ff.deleteFile(f); } catch {} }
       return;
     } catch (e) {
@@ -110,7 +132,7 @@ async function handleClip({ id, parts, h264, out, name, save }) {
 
 // Modo live: segmentos descarregados da live (MP4 fragmentado). Corta [from, to] sem re-encode;
 // o início recua até ao keyframe anterior, e o áudio corta no mesmo ponto para ficar em sincronia.
-async function handleServer({ id, inputs, abs, from, to, name, save }) {
+async function handleServer({ id, inputs, abs, from, to, name, save, clipId, channel }) {
   const ff = await getFFmpeg(id);
   const log = [];
   const onLog = ({ message }) => { log.push(message); if (log.length > 60) log.shift(); };
@@ -154,7 +176,7 @@ async function handleServer({ id, inputs, abs, from, to, name, save }) {
     if (code !== 0) { reset(); throw new Error('ffmpeg falhou (' + code + '): ' + log.slice(-4).join(' | ')); }
     files.push('out.mp4');
     const data = await ff.readFile('out.mp4');
-    await download(id, new Blob([data.buffer], { type: 'video/mp4' }), name, save);
+    await download(id, new Blob([data.buffer], { type: 'video/mp4' }), name, save, false, { clipId, channel });
   } catch (e) {
     // Nunca perder o que já foi descarregado da live: entrega o vídeo descarregado tal como
     // está (sem o corte preciso), para o utilizador poder pelo menos guardá-lo.
@@ -194,8 +216,8 @@ export function planCut(packets, { abs, from, to }) {
 // save=false: o clip vai para o editor (que guarda); só se entrega o ficheiro.
 // raw=true: a conversão falhou e isto é o clip tal como foi gravado/descarregado — nunca vai
 // para o editor (não sabe abrir estes casos), só é descarregado, para não se perder.
-async function download(id, blob, name, save = true, raw = false) {
-  if (!raw) await saveLastClip(blob, name).catch(() => {});   // para o editor (plano B)
+async function download(id, blob, name, save = true, raw = false, meta = {}) {
+  if (!raw) await saveLastClip(blob, name, meta.channel, meta.clipId).catch(() => {});   // para o editor (plano B)
   if (!save) { post({ type: 'done', id, name, size: blob.size, blob, raw }); return; }
   try {
     const url = URL.createObjectURL(blob);

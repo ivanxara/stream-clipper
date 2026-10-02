@@ -26,7 +26,21 @@ function tx(store, mode, fn) {
   }));
 }
 
-export const saveLastClip = (blob, name, channel) => tx('clips', 'readwrite', (s) => s.put({ blob, name, channel, at: Date.now() }, 'last'));
+// id = o clip de um clique concreto: o editor aberto nesse clique procura-o por aqui se a
+// mensagem direta não chegar. Guarda-se também por id, para vários clips seguidos não se pisarem.
+export const saveLastClip = async (blob, name, channel, id) => {
+  const item = { blob, name, channel, id, at: Date.now() };
+  await tx('clips', 'readwrite', (s) => s.put(item, 'last'));
+  if (!id) return;
+  await tx('clips', 'readwrite', (s) => s.put(item, 'id:' + id));
+  // Só os mais recentes (cada clip fica também nos "recentes" do editor).
+  const keys = ((await tx('clips', 'readonly', (s) => s.getAllKeys())) || []).filter((k) => String(k).startsWith('id:'));
+  if (keys.length <= 6) return;
+  const items = await Promise.all(keys.map((k) => tx('clips', 'readonly', (s) => s.get(k)).then((v) => [k, v?.at || 0])));
+  items.sort((x, y) => y[1] - x[1]);
+  await Promise.all(items.slice(6).map(([k]) => tx('clips', 'readwrite', (s) => s.delete(k))));
+};
+export const loadClipById = (id) => tx('clips', 'readonly', (s) => s.get('id:' + id));
 export const loadLastClip = () => tx('clips', 'readonly', (s) => s.get('last'));
 
 export async function saveRecentClip(blob, name, channel) {
@@ -67,4 +81,13 @@ export const listTemplates = () => all('templates');
 export const putTemplate = (t) => put('templates', t);
 export const deleteTemplate = (id) => del('templates', id);
 export const listRecentClips = () => all('recent').then((items) => items.reverse());
+
+export const countStored = (store) => tx(store, 'readonly', (s) => s.count());
+export const clearStored = (stores) => open().then((db) => new Promise((resolve, reject) => {
+  const transaction = db.transaction(stores, 'readwrite');
+  for (const store of stores) transaction.objectStore(store).clear();
+  transaction.oncomplete = () => { db.close(); resolve(); };
+  transaction.onerror = () => { db.close(); reject(transaction.error); };
+  transaction.onabort = () => { db.close(); reject(transaction.error || new Error('Não foi possível limpar os dados.')); };
+}));
 
